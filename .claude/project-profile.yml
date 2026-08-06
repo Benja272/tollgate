@@ -1,0 +1,15 @@
+# Tollgate per-repo profile — consumed by dev-strategy (raise-only floor)
+criticality: standard
+
+standards:
+  architecture: docs/adr/
+  conventions: AGENTS.md
+
+verification:
+  build: "go build ./..."
+  test: "go test ./... -race"
+  lint: "golangci-lint run"
+
+review:
+  blocking: [correctness, durability-semantics, cost-accounting]
+  advisory: [naming, comments, style]
