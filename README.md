@@ -1,5 +1,7 @@
 # Tollgate
 
+[![ci](https://github.com/Benja272/tollgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Benja272/tollgate/actions/workflows/ci.yml)
+
 **Metering and quality gates for coding agents you don't own.**
 
 Coding agents open PRs; nobody tells you what the run cost or blocks the PR

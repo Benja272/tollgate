@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Temporal CLI
+        run: |
+          curl -sSf https://temporal.download/cli.sh | sh
+          echo "$HOME/.temporalio/bin" >> "$GITHUB_PATH"
+
+      - name: Start Temporal dev server
+        run: |
+          temporal server start-dev --headless --log-level warn &
+          for i in $(seq 1 30); do
+            if temporal operator cluster health 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "temporal dev server did not become healthy" >&2
+          exit 1
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race detector, includes crash-resume invariant)
+        run: go test ./... -race -timeout 300s
+        env:
+          TOLLGATE_REQUIRE_TEMPORAL: "1"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install golangci-lint
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+
+      - name: Lint
+        run: golangci-lint run ./...

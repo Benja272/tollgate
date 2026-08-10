@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +53,11 @@ func (a *crashActivities) Ship(ctx context.Context, ws Workspace) (ShipResult, e
 func TestJobWorkflow_WorkerDiesMidAgentRun_ResumesAndShips(t *testing.T) {
 	c, err := client.Dial(client.Options{})
 	if err != nil {
+		// In CI the dev server must be up: a silent skip of the flagship
+		// invariant would be a lying green build.
+		if os.Getenv("TOLLGATE_REQUIRE_TEMPORAL") != "" {
+			t.Fatalf("TOLLGATE_REQUIRE_TEMPORAL is set but the dev server is unreachable: %v", err)
+		}
 		t.Skipf("temporal dev server not reachable, skipping integration test: %v", err)
 	}
 	defer c.Close()
