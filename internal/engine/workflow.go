@@ -11,6 +11,10 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
+// TaskQueue is the Temporal task queue tollgate workers poll and clients
+// submit jobs to.
+const TaskQueue = "tollgate-jobs"
+
 // runAgentMaxAttempts bounds retries of the agent run. The agent is a paid
 // external call with no idempotency guarantee, and Temporal's default retry
 // policy is unbounded — every extra attempt bills again (ADR-0003 makes
