@@ -97,3 +97,25 @@ the service; Grafana dashboards ship in the repo as code.
 Each week ends with something demoable. The README's FAQ answers "why not
 Devin / LangGraph / LangSmith" with the specific guarantee and primitive gaps,
 sourced.
+
+## 7. Future work (post-v1)
+
+- **Human-outcome calibration loop.** Once a gated PR is open, the human's
+  eventual action (merged untouched / changes requested / closed) is a
+  production-grade label for the gate's verdict: PASS followed by "changes
+  requested" is a false pass. Capture it via GitHub webhook or polling as
+  `HumanOutcome{job_id, outcome, latency, actor}` and chart the false-pass
+  rate per rubric version and judge model — this detects calibration drift
+  (e.g. a silently revised judge snapshot) from live data, at no labeling
+  cost. Two known limits shape the design:
+  - *Censoring*: rejected jobs never reach a human, so false rejections are
+    invisible to this loop. A sampled audit — a configurable fraction of
+    `rejected` jobs routed to human labeling anyway — is required to observe
+    the other half of the confusion matrix.
+  - *Label noise*: human review outcomes encode taste and context outside
+    the rubric's scope. They complement the curated reference set of
+    ADR-0003; they never replace it as the calibration standard.
+
+  The immutable per-attempt history from ADR-0003 already persists
+  everything else this needs; the extension is the outcome label plus the
+  ingestion path.
