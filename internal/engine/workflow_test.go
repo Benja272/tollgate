@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -87,4 +88,64 @@ func TestJobWorkflow_RunAgentKeepsFailing_StopsAfterBoundedAttempts(t *testing.T
 	require.Equal(t, runAgentMaxAttempts, attempts)
 	env.AssertNotCalled(t, "Judge", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
+}
+
+func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
+	cases := []struct {
+		name      string
+		failing   string
+		notCalled []string
+	}{
+		{"prepare fails", "Prepare", []string{"RunAgent", "Judge", "DecideGate", "Ship"}},
+		{"run agent fails", "RunAgent", []string{"Judge", "DecideGate", "Ship"}},
+		{"judge fails", "Judge", []string{"DecideGate", "Ship"}},
+		{"gate decision fails", "DecideGate", []string{"Ship"}},
+		{"ship fails", "Ship", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestWorkflowEnvironment()
+
+			var acts *Activities
+			boom := temporal.NewNonRetryableApplicationError("boom", "TestFailure", nil)
+
+			phases := []struct {
+				name     string
+				register func(err error)
+			}{
+				{"Prepare", func(err error) {
+					env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job"}, err)
+				}},
+				{"RunAgent", func(err error) {
+					env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{}, err)
+				}},
+				{"Judge", func(err error) {
+					env.OnActivity(acts.Judge, mock.Anything, mock.Anything).Return(JudgeReport{}, err)
+				}},
+				{"DecideGate", func(err error) {
+					env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(GateDecision{Outcome: GatePass}, err)
+				}},
+				{"Ship", func(err error) {
+					env.OnActivity(acts.Ship, mock.Anything, mock.Anything).Return(ShipResult{}, err)
+				}},
+			}
+			for _, p := range phases {
+				if p.name == tc.failing {
+					p.register(boom)
+					break
+				}
+				p.register(nil)
+			}
+
+			env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-err", Repo: "Benja272/tollgate", SourceRef: "issue-45"})
+
+			require.True(t, env.IsWorkflowCompleted())
+			require.Error(t, env.GetWorkflowError())
+			for _, name := range tc.notCalled {
+				env.AssertNotCalled(t, name, mock.Anything, mock.Anything)
+			}
+		})
+	}
 }
