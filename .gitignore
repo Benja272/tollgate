@@ -1,0 +1,7 @@
+# Local tooling caches
+.atl/
+
+# Go build artifacts
+/bin/
+*.test
+*.out
