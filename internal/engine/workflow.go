@@ -110,8 +110,12 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
+	// HeartbeatTimeout lets the server detect a dead worker mid-agent-run in
+	// seconds instead of waiting out StartToCloseTimeout; adapters must
+	// heartbeat at least every couple of seconds while the agent runs.
 	agentCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 10 * time.Minute,
+		HeartbeatTimeout:    5 * time.Second,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: runAgentMaxAttempts},
 	})
 	var agent AgentResult
