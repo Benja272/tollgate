@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -64,5 +65,26 @@ func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusRejected, result.Status)
 	require.Empty(t, result.PRURL)
+	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
+}
+
+func TestJobWorkflow_RunAgentKeepsFailing_StopsAfterBoundedAttempts(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	var acts *Activities
+	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-3"}, nil)
+
+	attempts := 0
+	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) { attempts++ }).
+		Return(AgentResult{}, errors.New("agent crashed"))
+
+	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-3", Repo: "Benja272/tollgate", SourceRef: "issue-44"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, runAgentMaxAttempts, attempts)
+	env.AssertNotCalled(t, "Judge", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
 }

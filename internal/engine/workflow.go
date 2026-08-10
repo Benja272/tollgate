@@ -7,8 +7,15 @@ import (
 	"context"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
+
+// runAgentMaxAttempts bounds retries of the agent run. The agent is a paid
+// external call with no idempotency guarantee, and Temporal's default retry
+// policy is unbounded — every extra attempt bills again (ADR-0003 makes
+// retry spend an explicit budget, never an accident).
+const runAgentMaxAttempts = 2
 
 // JobInput identifies the work a job performs and where it happens.
 type JobInput struct {
@@ -99,8 +106,12 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
+	agentCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 10 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: runAgentMaxAttempts},
+	})
 	var agent AgentResult
-	if err := workflow.ExecuteActivity(ctx, acts.RunAgent, ws).Get(ctx, &agent); err != nil {
+	if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, ws).Get(agentCtx, &agent); err != nil {
 		return JobResult{}, err
 	}
 
