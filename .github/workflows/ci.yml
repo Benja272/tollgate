@@ -8,12 +8,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tollgate
+          POSTGRES_PASSWORD: tollgate
+          POSTGRES_DB: tollgate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tollgate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Apply database migrations
+        run: |
+          go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
+          "$(go env GOPATH)/bin/goose" -dir migrations postgres "postgres://tollgate:tollgate@localhost:5432/tollgate?sslmode=disable" up
 
       - name: Install Temporal CLI
         run: |
@@ -33,10 +52,11 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Test (race detector, includes crash-resume invariant)
+      - name: Test (race detector, includes crash-resume and ledger integration)
         run: go test ./... -race -timeout 300s
         env:
           TOLLGATE_REQUIRE_TEMPORAL: "1"
+          TOLLGATE_REQUIRE_POSTGRES: "1"
 
   lint:
     runs-on: ubuntu-latest

@@ -111,6 +111,12 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
+	if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
+		JobID: in.JobID, Phase: "run_agent", Actor: "agent", USD: agent.CostUSD, Attempt: 1,
+	}}).Get(ctx, nil); err != nil {
+		return JobResult{}, err
+	}
+
 	rubricPath := in.RubricPath
 	if rubricPath == "" {
 		rubricPath = defaultRubricPath
@@ -136,6 +142,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		})
 	}
 	verdicts := make([]gate.Verdict, len(models))
+	judgeEntries := make([]ports.CostEntry, len(models))
 	totalCost := agent.CostUSD
 	for i, f := range futures {
 		var judgment ports.Judgment
@@ -144,6 +151,13 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		}
 		verdicts[i] = judgment.Verdict
 		totalCost += judgment.CostUSD
+		judgeEntries[i] = ports.CostEntry{
+			JobID: in.JobID, Phase: "judge", Actor: "judge:" + models[i],
+			Model: models[i], USD: judgment.CostUSD, Attempt: 1,
+		}
+	}
+	if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, judgeEntries).Get(ctx, nil); err != nil {
+		return JobResult{}, err
 	}
 
 	var decision gate.Decision

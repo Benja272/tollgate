@@ -29,6 +29,9 @@ type Activities struct {
 	// JobInput select from here.
 	Judges map[string]ports.Judge
 
+	// Ledger persists cost entries (ADR-0004).
+	Ledger ports.LedgerStore
+
 	// WorkspaceRoot is where per-job workspaces are created; zero means the
 	// OS temp directory.
 	WorkspaceRoot string
@@ -134,6 +137,13 @@ type DecideInput struct {
 // gate.Decide; the activity exists so the decision lands in the journal.
 func (a *Activities) DecideGate(ctx context.Context, in DecideInput) (gate.Decision, error) {
 	return gate.Decide(in.Rubric, in.Verdicts)
+}
+
+// RecordCosts persists ledger entries. It is deliberately its own activity:
+// a paid call and a cheap retryable write must never share one, or a
+// failed write would re-run — and re-bill — the paid call.
+func (a *Activities) RecordCosts(ctx context.Context, entries []ports.CostEntry) error {
+	return a.Ledger.RecordCosts(ctx, entries)
 }
 
 // Ship is scaffolding: PR creation needs an idempotency design first

@@ -38,6 +38,8 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 
 	rubric := gate.Rubric{Name: "test", Version: "sha256:abc", Axes: []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}}}
 
+	var recorded []ports.CostEntry
+
 	var acts *Activities
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).
 		Run(record("prepare")).
@@ -45,6 +47,14 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).
 		Run(record("run_agent")).
 		Return(AgentResult{CostUSD: 1.23, Output: "did the thing"}, nil)
+	env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, "record_cost")
+			recorded = append(recorded, args.Get(1).([]ports.CostEntry)...)
+		}).
+		Return(nil)
 	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).
 		Run(record("load_rubric")).
 		Return(rubric, nil)
@@ -73,8 +83,17 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, []string{"prepare", "run_agent", "load_rubric", "judge", "judge", "gate", "ship"}, order,
-		"one judge activity per configured judge model")
+	require.Equal(t, []string{"prepare", "run_agent", "record_cost", "load_rubric", "judge", "judge", "record_cost", "gate", "ship"}, order,
+		"one judge activity per configured judge model; costs recorded after the agent and after the judges")
+
+	require.Len(t, recorded, 3, "one ledger entry for the agent plus one per judge")
+	require.Equal(t, "agent", recorded[0].Actor)
+	require.InDelta(t, 1.23, recorded[0].USD, 1e-9)
+	require.Equal(t, "judge:haiku", recorded[1].Actor)
+	require.Equal(t, "judge:sonnet", recorded[2].Actor)
+	for _, e := range recorded {
+		require.Equal(t, "job-1", e.JobID)
+	}
 }
 
 func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
@@ -86,6 +105,7 @@ func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	var acts *Activities
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-2"}, nil)
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 0.5}, nil)
+	env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, nil)
 	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(ports.Judgment{Verdict: passVerdict(rubric.Version), CostUSD: 0.1}, nil)
 	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).
@@ -134,8 +154,9 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 		failing   string
 		notCalled []string
 	}{
-		{"prepare fails", "Prepare", []string{"RunAgent", "LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
-		{"run agent fails", "RunAgent", []string{"LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
+		{"prepare fails", "Prepare", []string{"RunAgent", "RecordCosts", "LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
+		{"run agent fails", "RunAgent", []string{"RecordCosts", "LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
+		{"record costs fails", "RecordCosts", []string{"LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
 		{"load rubric fails", "LoadRubric", []string{"JudgeOne", "DecideGate", "Ship"}},
 		{"judge fails", "JudgeOne", []string{"DecideGate", "Ship"}},
 		{"gate decision fails", "DecideGate", []string{"Ship"}},
@@ -161,6 +182,9 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 				}},
 				{"RunAgent", func(err error) {
 					env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{}, err)
+				}},
+				{"RecordCosts", func(err error) {
+					env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).Return(err)
 				}},
 				{"LoadRubric", func(err error) {
 					env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, err)

@@ -41,6 +41,10 @@ func (a *crashActivities) RunAgent(ctx context.Context, in RunAgentInput) (Agent
 	return AgentResult{CostUSD: 2.5}, nil
 }
 
+func (a *crashActivities) RecordCosts(ctx context.Context, entries []ports.CostEntry) error {
+	return nil
+}
+
 func (a *crashActivities) LoadRubric(ctx context.Context, path string) (gate.Rubric, error) {
 	return gate.Rubric{
 		Name:    "crash-test",
