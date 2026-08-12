@@ -112,12 +112,13 @@ type JudgeInput struct {
 	Rubric gate.Rubric
 }
 
-// JudgeOne runs a single judge. An unknown model is a configuration error,
-// not a judgment — non-retryable, since retrying cannot fix wiring.
-func (a *Activities) JudgeOne(ctx context.Context, in JudgeInput) (gate.Verdict, error) {
+// JudgeOne runs a single judge and reports its judgment — verdict plus
+// cost. An unknown model is a configuration error, not a judgment —
+// non-retryable, since retrying cannot fix wiring.
+func (a *Activities) JudgeOne(ctx context.Context, in JudgeInput) (ports.Judgment, error) {
 	j, ok := a.Judges[in.Model]
 	if !ok {
-		return gate.Verdict{}, temporal.NewNonRetryableApplicationError(
+		return ports.Judgment{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("no judge wired for model %q", in.Model), "JudgeConfig", nil)
 	}
 	return j.Judge(ctx, ports.JudgeRequest{Diff: in.Change, Ticket: in.Ticket, Rubric: in.Rubric})

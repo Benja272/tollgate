@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/Benja272/tollgate/internal/gate"
+	"github.com/Benja272/tollgate/internal/ports"
 )
 
 // crashActivities mirrors the Activities method set so the workflow resolves
@@ -48,11 +49,14 @@ func (a *crashActivities) LoadRubric(ctx context.Context, path string) (gate.Rub
 	}, nil
 }
 
-func (a *crashActivities) JudgeOne(ctx context.Context, in JudgeInput) (gate.Verdict, error) {
-	return gate.Verdict{
-		Judge:         in.Model,
-		RubricVersion: in.Rubric.Version,
-		Scores:        map[string]int{"correctness": 5},
+func (a *crashActivities) JudgeOne(ctx context.Context, in JudgeInput) (ports.Judgment, error) {
+	return ports.Judgment{
+		Verdict: gate.Verdict{
+			Judge:         in.Model,
+			RubricVersion: in.Rubric.Version,
+			Scores:        map[string]int{"correctness": 5},
+		},
+		CostUSD: 0.01,
 	}, nil
 }
 

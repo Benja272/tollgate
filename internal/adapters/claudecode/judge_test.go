@@ -41,23 +41,24 @@ func TestCLIJudge_ParsesVerdict(t *testing.T) {
 	j := &CLIJudge{Bin: bin, Model: "haiku"}
 	rubric := judgeRubric(t)
 
-	v, err := j.Judge(context.Background(), ports.JudgeRequest{Diff: "diff", Ticket: "ticket", Rubric: rubric})
+	got, err := j.Judge(context.Background(), ports.JudgeRequest{Diff: "diff", Ticket: "ticket", Rubric: rubric})
 
 	require.NoError(t, err)
-	require.Equal(t, "haiku", v.Judge)
-	require.Equal(t, rubric.Version, v.RubricVersion, "verdict must pin the rubric version it judged against")
-	require.Equal(t, map[string]int{"correctness": 4, "clarity": 2}, v.Scores)
-	require.Equal(t, []string{"naming could improve"}, v.Findings)
+	require.Equal(t, "haiku", got.Verdict.Judge)
+	require.Equal(t, rubric.Version, got.Verdict.RubricVersion, "verdict must pin the rubric version it judged against")
+	require.Equal(t, map[string]int{"correctness": 4, "clarity": 2}, got.Verdict.Scores)
+	require.Equal(t, []string{"naming could improve"}, got.Verdict.Findings)
+	require.InDelta(t, 0.02, got.CostUSD, 1e-9, "judging costs money too — the judgment must report it")
 }
 
 func TestCLIJudge_StripsMarkdownFences(t *testing.T) {
 	bin := fakeClaude(t, envelopeWith(`"`+"```json\\n"+`{\"scores\":{\"correctness\":5,\"clarity\":5},\"findings\":[]}`+"\\n```"+`"`))
 	j := &CLIJudge{Bin: bin, Model: "sonnet"}
 
-	v, err := j.Judge(context.Background(), ports.JudgeRequest{Diff: "d", Ticket: "t", Rubric: judgeRubric(t)})
+	got, err := j.Judge(context.Background(), ports.JudgeRequest{Diff: "d", Ticket: "t", Rubric: judgeRubric(t)})
 
 	require.NoError(t, err)
-	require.Equal(t, 5, v.Scores["correctness"])
+	require.Equal(t, 5, got.Verdict.Scores["correctness"])
 }
 
 func TestCLIJudge_MalformedVerdictJSON_IsError(t *testing.T) {

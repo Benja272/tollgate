@@ -29,32 +29,35 @@ type verdictPayload struct {
 	Findings []string       `json:"findings"`
 }
 
-func (j *CLIJudge) Judge(ctx context.Context, req ports.JudgeRequest) (gate.Verdict, error) {
+func (j *CLIJudge) Judge(ctx context.Context, req ports.JudgeRequest) (ports.Judgment, error) {
 	cmd := exec.CommandContext(ctx, j.Bin, "-p", judgePrompt(req), "--output-format", "json", "--model", j.Model)
 
 	out, err := cmd.Output()
 	if err != nil {
-		return gate.Verdict{}, fmt.Errorf("judge %s run: %w", j.Model, err)
+		return ports.Judgment{}, fmt.Errorf("judge %s run: %w", j.Model, err)
 	}
 
 	var env resultEnvelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return gate.Verdict{}, fmt.Errorf("judge %s: parse claude output: %w", j.Model, err)
+		return ports.Judgment{}, fmt.Errorf("judge %s: parse claude output: %w", j.Model, err)
 	}
 	if env.IsError {
-		return gate.Verdict{}, fmt.Errorf("judge %s reported error: %s", j.Model, env.Result)
+		return ports.Judgment{}, fmt.Errorf("judge %s reported error: %s", j.Model, env.Result)
 	}
 
 	var payload verdictPayload
 	if err := json.Unmarshal([]byte(stripFences(env.Result)), &payload); err != nil {
-		return gate.Verdict{}, fmt.Errorf("judge %s: verdict is not valid JSON: %w", j.Model, err)
+		return ports.Judgment{}, fmt.Errorf("judge %s: verdict is not valid JSON: %w", j.Model, err)
 	}
 
-	return gate.Verdict{
-		Judge:         j.Model,
-		RubricVersion: req.Rubric.Version,
-		Scores:        payload.Scores,
-		Findings:      payload.Findings,
+	return ports.Judgment{
+		Verdict: gate.Verdict{
+			Judge:         j.Model,
+			RubricVersion: req.Rubric.Version,
+			Scores:        payload.Scores,
+			Findings:      payload.Findings,
+		},
+		CostUSD: env.TotalCostUSD,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/Benja272/tollgate/internal/gate"
+	"github.com/Benja272/tollgate/internal/ports"
 )
 
 func passVerdict(rubricVersion string) gate.Verdict {
@@ -49,7 +50,7 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 		Return(rubric, nil)
 	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).
 		Run(record("judge")).
-		Return(passVerdict(rubric.Version), nil)
+		Return(ports.Judgment{Verdict: passVerdict(rubric.Version), CostUSD: 0.1}, nil)
 	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).
 		Run(record("gate")).
 		Return(gate.Decision{Outcome: gate.OutcomePass, Policy: gate.PolicyFailClosedV1, RubricVersion: rubric.Version}, nil)
@@ -68,7 +69,7 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 	var result JobResult
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusShipped, result.Status)
-	require.InDelta(t, 1.23, result.CostUSD, 1e-9, "agent cost must surface in the job result")
+	require.InDelta(t, 1.43, result.CostUSD, 1e-9, "job cost must aggregate agent AND judge costs (1.23 + 2×0.10)")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -86,7 +87,7 @@ func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-2"}, nil)
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 0.5}, nil)
 	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, nil)
-	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(passVerdict(rubric.Version), nil)
+	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(ports.Judgment{Verdict: passVerdict(rubric.Version), CostUSD: 0.1}, nil)
 	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).
 		Return(gate.Decision{Outcome: gate.OutcomeFail, Policy: gate.PolicyFailClosedV1, RubricVersion: rubric.Version, FailedBlocking: []string{"correctness"}}, nil)
 
@@ -99,7 +100,7 @@ func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusRejected, result.Status)
 	require.Empty(t, result.PRURL)
-	require.InDelta(t, 0.5, result.CostUSD, 1e-9, "a rejected job still reports what it cost")
+	require.InDelta(t, 0.7, result.CostUSD, 1e-9, "a rejected job still reports its full cost, judges included (0.5 + 2×0.10)")
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
 }
 
@@ -165,7 +166,7 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 					env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, err)
 				}},
 				{"JudgeOne", func(err error) {
-					env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(passVerdict(rubric.Version), err)
+					env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(ports.Judgment{Verdict: passVerdict(rubric.Version), CostUSD: 0.1}, err)
 				}},
 				{"DecideGate", func(err error) {
 					env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(gate.Decision{Outcome: gate.OutcomePass}, err)

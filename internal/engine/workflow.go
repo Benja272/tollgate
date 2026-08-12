@@ -10,6 +10,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/Benja272/tollgate/internal/gate"
+	"github.com/Benja272/tollgate/internal/ports"
 )
 
 // TaskQueue is the Temporal task queue tollgate workers poll and clients
@@ -52,9 +53,9 @@ const (
 	StatusRejected JobStatus = "rejected"
 )
 
-// JobResult is what a completed workflow reports back. CostUSD is the
-// agent-reported estimate for the run (the full per-phase ledger is a
-// separate milestone).
+// JobResult is what a completed workflow reports back. CostUSD aggregates
+// the agent run and every judgment; it is a client-side estimate (the
+// itemized per-actor ledger is a separate milestone).
 type JobResult struct {
 	Status  JobStatus
 	PRURL   string
@@ -135,10 +136,14 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		})
 	}
 	verdicts := make([]gate.Verdict, len(models))
+	totalCost := agent.CostUSD
 	for i, f := range futures {
-		if err := f.Get(ctx, &verdicts[i]); err != nil {
+		var judgment ports.Judgment
+		if err := f.Get(ctx, &judgment); err != nil {
 			return JobResult{}, err
 		}
+		verdicts[i] = judgment.Verdict
+		totalCost += judgment.CostUSD
 	}
 
 	var decision gate.Decision
@@ -147,7 +152,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 	}
 
 	if decision.Outcome != gate.OutcomePass {
-		return JobResult{Status: StatusRejected, CostUSD: agent.CostUSD}, nil
+		return JobResult{Status: StatusRejected, CostUSD: totalCost}, nil
 	}
 
 	var shipped ShipResult
@@ -155,5 +160,5 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
-	return JobResult{Status: StatusShipped, PRURL: shipped.PRURL, CostUSD: agent.CostUSD}, nil
+	return JobResult{Status: StatusShipped, PRURL: shipped.PRURL, CostUSD: totalCost}, nil
 }

@@ -14,8 +14,15 @@ type JudgeRequest struct {
 	Rubric gate.Rubric
 }
 
+// Judgment is a verdict plus what producing it cost: judging spends money
+// like any other LLM call, and the ledger models the job's FULL cost.
+type Judgment struct {
+	Verdict gate.Verdict
+	CostUSD float64
+}
+
 // Judge scores one attempt against a rubric, independently of any other
 // judge (ADR-0003).
 type Judge interface {
-	Judge(ctx context.Context, req JudgeRequest) (gate.Verdict, error)
+	Judge(ctx context.Context, req JudgeRequest) (Judgment, error)
 }
