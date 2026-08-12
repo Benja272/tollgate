@@ -10,6 +10,7 @@ import (
 
 	"github.com/Benja272/tollgate/internal/adapters/claudecode"
 	"github.com/Benja272/tollgate/internal/engine"
+	"github.com/Benja272/tollgate/internal/ports"
 )
 
 func main() {
@@ -23,6 +24,11 @@ func main() {
 	w.RegisterWorkflow(engine.JobWorkflow)
 	w.RegisterActivity(&engine.Activities{
 		Agent: &claudecode.Runner{Bin: "claude"},
+		Judges: map[string]ports.Judge{
+			"haiku":  &claudecode.CLIJudge{Bin: "claude", Model: "haiku"},
+			"sonnet": &claudecode.CLIJudge{Bin: "claude", Model: "sonnet"},
+			"opus":   &claudecode.CLIJudge{Bin: "claude", Model: "opus"},
+		},
 	})
 
 	if err := w.Run(worker.InterruptCh()); err != nil {

@@ -12,6 +12,8 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+
+	"github.com/Benja272/tollgate/internal/gate"
 )
 
 // crashActivities mirrors the Activities method set so the workflow resolves
@@ -38,12 +40,24 @@ func (a *crashActivities) RunAgent(ctx context.Context, in RunAgentInput) (Agent
 	return AgentResult{CostUSD: 2.5}, nil
 }
 
-func (a *crashActivities) Judge(ctx context.Context, ws Workspace) (JudgeReport, error) {
-	return JudgeReport{}, nil
+func (a *crashActivities) LoadRubric(ctx context.Context, path string) (gate.Rubric, error) {
+	return gate.Rubric{
+		Name:    "crash-test",
+		Version: "sha256:crash",
+		Axes:    []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}},
+	}, nil
 }
 
-func (a *crashActivities) DecideGate(ctx context.Context, report JudgeReport) (GateDecision, error) {
-	return GateDecision{Outcome: GatePass}, nil
+func (a *crashActivities) JudgeOne(ctx context.Context, in JudgeInput) (gate.Verdict, error) {
+	return gate.Verdict{
+		Judge:         in.Model,
+		RubricVersion: in.Rubric.Version,
+		Scores:        map[string]int{"correctness": 5},
+	}, nil
+}
+
+func (a *crashActivities) DecideGate(ctx context.Context, in DecideInput) (gate.Decision, error) {
+	return gate.Decide(in.Rubric, in.Verdicts)
 }
 
 func (a *crashActivities) Ship(ctx context.Context, ws Workspace) (ShipResult, error) {

@@ -8,6 +8,8 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	"github.com/Benja272/tollgate/internal/gate"
 )
 
 // TaskQueue is the Temporal task queue tollgate workers poll and clients
@@ -28,7 +30,19 @@ type JobInput struct {
 	Repo      string
 	SourceRef string
 	Prompt    string
+
+	// RubricPath selects the rubric file; empty means defaultRubricPath.
+	RubricPath string
+	// JudgeModels selects the judge models, one activity each; empty means
+	// defaultJudgeModels.
+	JudgeModels []string
 }
+
+// Gate defaults. Resolved inside the workflow, so they are pinned by the
+// journal like any other deterministic value.
+var defaultJudgeModels = []string{"haiku", "sonnet"}
+
+const defaultRubricPath = "rubrics/default.yaml"
 
 // JobStatus is the terminal state of a job.
 type JobStatus string
@@ -65,22 +79,6 @@ type AgentResult struct {
 	Output  string
 }
 
-// JudgeReport aggregates the verdicts of all judges for one attempt.
-type JudgeReport struct{}
-
-// GateOutcome is the gate's verdict over a judged attempt.
-type GateOutcome string
-
-const (
-	GatePass GateOutcome = "pass"
-	GateFail GateOutcome = "fail"
-)
-
-// GateDecision is the resolution-policy output for one attempt (ADR-0003).
-type GateDecision struct {
-	Outcome GateOutcome
-}
-
 // ShipResult reports the PR created for a passing job.
 type ShipResult struct {
 	PRURL string
@@ -112,17 +110,43 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
-	var report JudgeReport
-	if err := workflow.ExecuteActivity(ctx, acts.Judge, ws).Get(ctx, &report); err != nil {
+	rubricPath := in.RubricPath
+	if rubricPath == "" {
+		rubricPath = defaultRubricPath
+	}
+	var rubric gate.Rubric
+	if err := workflow.ExecuteActivity(ctx, acts.LoadRubric, rubricPath).Get(ctx, &rubric); err != nil {
 		return JobResult{}, err
 	}
 
-	var decision GateDecision
-	if err := workflow.ExecuteActivity(ctx, acts.DecideGate, report).Get(ctx, &decision); err != nil {
+	// One activity per judge, all in flight at once: each judgment is
+	// journaled, retried, and costed independently (ADR-0003).
+	models := in.JudgeModels
+	if len(models) == 0 {
+		models = defaultJudgeModels
+	}
+	futures := make([]workflow.Future, len(models))
+	for i, model := range models {
+		futures[i] = workflow.ExecuteActivity(ctx, acts.JudgeOne, JudgeInput{
+			Model:  model,
+			Change: agent.Output,
+			Ticket: in.Prompt,
+			Rubric: rubric,
+		})
+	}
+	verdicts := make([]gate.Verdict, len(models))
+	for i, f := range futures {
+		if err := f.Get(ctx, &verdicts[i]); err != nil {
+			return JobResult{}, err
+		}
+	}
+
+	var decision gate.Decision
+	if err := workflow.ExecuteActivity(ctx, acts.DecideGate, DecideInput{Rubric: rubric, Verdicts: verdicts}).Get(ctx, &decision); err != nil {
 		return JobResult{}, err
 	}
 
-	if decision.Outcome != GatePass {
+	if decision.Outcome != gate.OutcomePass {
 		return JobResult{Status: StatusRejected, CostUSD: agent.CostUSD}, nil
 	}
 

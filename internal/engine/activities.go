@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 
+	"github.com/Benja272/tollgate/internal/gate"
 	"github.com/Benja272/tollgate/internal/ports"
 )
 
@@ -22,6 +24,10 @@ const defaultHeartbeatInterval = 2 * time.Second
 // adapters at worker startup.
 type Activities struct {
 	Agent ports.AgentRunner
+
+	// Judges maps a judge model name to its implementation; JudgeModels in
+	// JobInput select from here.
+	Judges map[string]ports.Judge
 
 	// WorkspaceRoot is where per-job workspaces are created; zero means the
 	// OS temp directory.
@@ -91,17 +97,42 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	return AgentResult{CostUSD: res.CostUSD, Output: res.Output}, nil
 }
 
-// Judge is scaffolding: the rubric engine and N-judge fan-out are the gate
-// milestone (ADR-0003); until then every attempt yields an empty report.
-func (a *Activities) Judge(ctx context.Context, ws Workspace) (JudgeReport, error) {
-	return JudgeReport{}, nil
+// LoadRubric reads and content-addresses the rubric file. It is an
+// activity because file I/O belongs outside workflow code, and journaling
+// the loaded rubric pins the exact version every later phase uses.
+func (a *Activities) LoadRubric(ctx context.Context, path string) (gate.Rubric, error) {
+	return gate.LoadRubric(path)
 }
 
-// DecideGate is scaffolding for the same milestone: with no verdicts there
-// is nothing to fail on, so the empty report passes. The real resolution
-// policy (fail-closed over blocking axes) replaces this.
-func (a *Activities) DecideGate(ctx context.Context, report JudgeReport) (GateDecision, error) {
-	return GateDecision{Outcome: GatePass}, nil
+// JudgeInput is one judgment request: which judge model, over what change.
+type JudgeInput struct {
+	Model  string
+	Change string
+	Ticket string
+	Rubric gate.Rubric
+}
+
+// JudgeOne runs a single judge. An unknown model is a configuration error,
+// not a judgment — non-retryable, since retrying cannot fix wiring.
+func (a *Activities) JudgeOne(ctx context.Context, in JudgeInput) (gate.Verdict, error) {
+	j, ok := a.Judges[in.Model]
+	if !ok {
+		return gate.Verdict{}, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("no judge wired for model %q", in.Model), "JudgeConfig", nil)
+	}
+	return j.Judge(ctx, ports.JudgeRequest{Diff: in.Change, Ticket: in.Ticket, Rubric: in.Rubric})
+}
+
+// DecideInput carries the verdicts and the rubric they were judged against.
+type DecideInput struct {
+	Rubric   gate.Rubric
+	Verdicts []gate.Verdict
+}
+
+// DecideGate applies the resolution policy. The heavy lifting is the pure
+// gate.Decide; the activity exists so the decision lands in the journal.
+func (a *Activities) DecideGate(ctx context.Context, in DecideInput) (gate.Decision, error) {
+	return gate.Decide(in.Rubric, in.Verdicts)
 }
 
 // Ship is scaffolding: PR creation needs an idempotency design first

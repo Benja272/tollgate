@@ -1,0 +1,20 @@
+name: default
+axes:
+  - name: correctness
+    description: >-
+      The change does what the ticket asks, completely, without breaking
+      existing behavior or introducing bugs.
+    blocking: true
+    min_score: 4
+  - name: safety
+    description: >-
+      The change introduces no security issues, data loss risks, or
+      irreversible side effects beyond what the ticket requires.
+    blocking: true
+    min_score: 4
+  - name: clarity
+    description: >-
+      The change is readable and idiomatic for its codebase; naming and
+      structure would pass a human review without style complaints.
+    blocking: false
+    min_score: 3

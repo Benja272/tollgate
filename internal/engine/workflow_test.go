@@ -2,22 +2,40 @@ package engine
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+
+	"github.com/Benja272/tollgate/internal/gate"
 )
+
+func passVerdict(rubricVersion string) gate.Verdict {
+	return gate.Verdict{
+		Judge:         "haiku",
+		RubricVersion: rubricVersion,
+		Scores:        map[string]int{"correctness": 5, "clarity": 4},
+	}
+}
 
 func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 
+	var mu sync.Mutex
 	var order []string
 	record := func(phase string) func(mock.Arguments) {
-		return func(mock.Arguments) { order = append(order, phase) }
+		return func(mock.Arguments) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, phase)
+		}
 	}
+
+	rubric := gate.Rubric{Name: "test", Version: "sha256:abc", Axes: []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}}}
 
 	var acts *Activities
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).
@@ -25,18 +43,24 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 		Return(Workspace{Path: "/tmp/job-1"}, nil)
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).
 		Run(record("run_agent")).
-		Return(AgentResult{CostUSD: 1.23}, nil)
-	env.OnActivity(acts.Judge, mock.Anything, mock.Anything).
+		Return(AgentResult{CostUSD: 1.23, Output: "did the thing"}, nil)
+	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).
+		Run(record("load_rubric")).
+		Return(rubric, nil)
+	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).
 		Run(record("judge")).
-		Return(JudgeReport{}, nil)
+		Return(passVerdict(rubric.Version), nil)
 	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).
 		Run(record("gate")).
-		Return(GateDecision{Outcome: GatePass}, nil)
+		Return(gate.Decision{Outcome: gate.OutcomePass, Policy: gate.PolicyFailClosedV1, RubricVersion: rubric.Version}, nil)
 	env.OnActivity(acts.Ship, mock.Anything, mock.Anything).
 		Run(record("ship")).
 		Return(ShipResult{PRURL: "https://github.com/Benja272/tollgate/pull/1"}, nil)
 
-	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-1", Repo: "Benja272/tollgate", SourceRef: "issue-42", Prompt: "implement the ticket"})
+	env.ExecuteWorkflow(JobWorkflow, JobInput{
+		JobID: "job-1", Repo: "Benja272/tollgate", SourceRef: "issue-42",
+		Prompt: "implement the ticket", JudgeModels: []string{"haiku", "sonnet"},
+	})
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -45,20 +69,28 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusShipped, result.Status)
 	require.InDelta(t, 1.23, result.CostUSD, 1e-9, "agent cost must surface in the job result")
-	require.Equal(t, []string{"prepare", "run_agent", "judge", "gate", "ship"}, order)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"prepare", "run_agent", "load_rubric", "judge", "judge", "gate", "ship"}, order,
+		"one judge activity per configured judge model")
 }
 
 func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 
+	rubric := gate.Rubric{Name: "test", Version: "sha256:abc", Axes: []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}}}
+
 	var acts *Activities
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-2"}, nil)
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 0.5}, nil)
-	env.OnActivity(acts.Judge, mock.Anything, mock.Anything).Return(JudgeReport{}, nil)
-	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(GateDecision{Outcome: GateFail}, nil)
+	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, nil)
+	env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(passVerdict(rubric.Version), nil)
+	env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).
+		Return(gate.Decision{Outcome: gate.OutcomeFail, Policy: gate.PolicyFailClosedV1, RubricVersion: rubric.Version, FailedBlocking: []string{"correctness"}}, nil)
 
-	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-2", Repo: "Benja272/tollgate", SourceRef: "issue-43"})
+	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-2", Repo: "Benja272/tollgate", SourceRef: "issue-43", Prompt: "p"})
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -67,6 +99,7 @@ func TestJobWorkflow_GateFail_RejectsWithoutShipping(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusRejected, result.Status)
 	require.Empty(t, result.PRURL)
+	require.InDelta(t, 0.5, result.CostUSD, 1e-9, "a rejected job still reports what it cost")
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
 }
 
@@ -77,17 +110,20 @@ func TestJobWorkflow_RunAgentKeepsFailing_StopsAfterBoundedAttempts(t *testing.T
 	var acts *Activities
 	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-3"}, nil)
 
+	var mu sync.Mutex
 	attempts := 0
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).
-		Run(func(mock.Arguments) { attempts++ }).
+		Run(func(mock.Arguments) { mu.Lock(); attempts++; mu.Unlock() }).
 		Return(AgentResult{}, errors.New("agent crashed"))
 
-	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-3", Repo: "Benja272/tollgate", SourceRef: "issue-44"})
+	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-3", Repo: "Benja272/tollgate", SourceRef: "issue-44", Prompt: "p"})
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
+	mu.Lock()
+	defer mu.Unlock()
 	require.Equal(t, runAgentMaxAttempts, attempts)
-	env.AssertNotCalled(t, "Judge", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "JudgeOne", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
 }
 
@@ -97,12 +133,15 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 		failing   string
 		notCalled []string
 	}{
-		{"prepare fails", "Prepare", []string{"RunAgent", "Judge", "DecideGate", "Ship"}},
-		{"run agent fails", "RunAgent", []string{"Judge", "DecideGate", "Ship"}},
-		{"judge fails", "Judge", []string{"DecideGate", "Ship"}},
+		{"prepare fails", "Prepare", []string{"RunAgent", "LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
+		{"run agent fails", "RunAgent", []string{"LoadRubric", "JudgeOne", "DecideGate", "Ship"}},
+		{"load rubric fails", "LoadRubric", []string{"JudgeOne", "DecideGate", "Ship"}},
+		{"judge fails", "JudgeOne", []string{"DecideGate", "Ship"}},
 		{"gate decision fails", "DecideGate", []string{"Ship"}},
 		{"ship fails", "Ship", nil},
 	}
+
+	rubric := gate.Rubric{Name: "test", Version: "sha256:abc", Axes: []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,11 +161,14 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 				{"RunAgent", func(err error) {
 					env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{}, err)
 				}},
-				{"Judge", func(err error) {
-					env.OnActivity(acts.Judge, mock.Anything, mock.Anything).Return(JudgeReport{}, err)
+				{"LoadRubric", func(err error) {
+					env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(rubric, err)
+				}},
+				{"JudgeOne", func(err error) {
+					env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(passVerdict(rubric.Version), err)
 				}},
 				{"DecideGate", func(err error) {
-					env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(GateDecision{Outcome: GatePass}, err)
+					env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(gate.Decision{Outcome: gate.OutcomePass}, err)
 				}},
 				{"Ship", func(err error) {
 					env.OnActivity(acts.Ship, mock.Anything, mock.Anything).Return(ShipResult{}, err)
@@ -140,7 +182,7 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 				p.register(nil)
 			}
 
-			env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-err", Repo: "Benja272/tollgate", SourceRef: "issue-45"})
+			env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-err", Repo: "Benja272/tollgate", SourceRef: "issue-45", Prompt: "p"})
 
 			require.True(t, env.IsWorkflowCompleted())
 			require.Error(t, env.GetWorkflowError())
