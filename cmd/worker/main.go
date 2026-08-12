@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/Benja272/tollgate/internal/adapters/claudecode"
 	"github.com/Benja272/tollgate/internal/engine"
 )
 
@@ -20,7 +21,9 @@ func main() {
 
 	w := worker.New(c, engine.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(engine.JobWorkflow)
-	w.RegisterActivity(&engine.Activities{})
+	w.RegisterActivity(&engine.Activities{
+		Agent: &claudecode.Runner{Bin: "claude"},
+	})
 
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		log.Fatalf("worker: %v", err)

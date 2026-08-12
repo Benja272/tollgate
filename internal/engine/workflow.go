@@ -4,7 +4,6 @@
 package engine
 
 import (
-	"context"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -71,30 +70,6 @@ type GateDecision struct {
 // ShipResult reports the PR created for a passing job.
 type ShipResult struct {
 	PRURL string
-}
-
-// Activities declares every side-effecting step of the job pipeline.
-// Implementations live behind ports; the workflow only sees signatures.
-type Activities struct{}
-
-func (a *Activities) Prepare(ctx context.Context, in JobInput) (Workspace, error) {
-	panic("not implemented")
-}
-
-func (a *Activities) RunAgent(ctx context.Context, ws Workspace) (AgentResult, error) {
-	panic("not implemented")
-}
-
-func (a *Activities) Judge(ctx context.Context, ws Workspace) (JudgeReport, error) {
-	panic("not implemented")
-}
-
-func (a *Activities) DecideGate(ctx context.Context, report JudgeReport) (GateDecision, error) {
-	panic("not implemented")
-}
-
-func (a *Activities) Ship(ctx context.Context, ws Workspace) (ShipResult, error) {
-	panic("not implemented")
 }
 
 // JobWorkflow orchestrates one job from ticket to PR or rejection.
