@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +36,10 @@ func TestActivities_RunAgent_HeartbeatsWhileAgentRuns(t *testing.T) {
 		heartbeat:         func(context.Context) { beats.Add(1) },
 	}
 
-	got, err := acts.RunAgent(context.Background(), Workspace{Path: t.TempDir()})
+	got, err := acts.RunAgent(context.Background(), RunAgentInput{
+		Workspace: Workspace{Path: t.TempDir()},
+		Prompt:    "implement the ticket",
+	})
 
 	require.NoError(t, err)
 	require.InDelta(t, 0.5, got.CostUSD, 1e-9)
@@ -57,10 +61,23 @@ func TestActivities_RunAgent_ReturnsAgentCost(t *testing.T) {
 	}
 	env.RegisterActivity(acts.RunAgent)
 
-	val, err := env.ExecuteActivity(acts.RunAgent, Workspace{Path: t.TempDir()})
+	val, err := env.ExecuteActivity(acts.RunAgent, RunAgentInput{Workspace: Workspace{Path: t.TempDir()}, Prompt: "noop"})
 	require.NoError(t, err)
 
 	var got AgentResult
 	require.NoError(t, val.Get(&got))
 	require.InDelta(t, 0.5, got.CostUSD, 1e-9)
+}
+
+func TestActivities_Prepare_CreatesIsolatedWorkspacePerJob(t *testing.T) {
+	root := t.TempDir()
+	acts := &Activities{WorkspaceRoot: root}
+
+	ws, err := acts.Prepare(context.Background(), JobInput{JobID: "job-42"})
+
+	require.NoError(t, err)
+	require.Contains(t, ws.Path, "job-42")
+	info, statErr := os.Stat(ws.Path)
+	require.NoError(t, statErr)
+	require.True(t, info.IsDir())
 }

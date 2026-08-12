@@ -20,11 +20,14 @@ const TaskQueue = "tollgate-jobs"
 // retry spend an explicit budget, never an accident).
 const runAgentMaxAttempts = 2
 
-// JobInput identifies the work a job performs and where it happens.
+// JobInput identifies the work a job performs and where it happens. Prompt
+// is the ticket text handed to the agent; a richer intake model (issue
+// sources, base branches) is still open design.
 type JobInput struct {
 	JobID     string
 	Repo      string
 	SourceRef string
+	Prompt    string
 }
 
 // JobStatus is the terminal state of a job.
@@ -35,10 +38,13 @@ const (
 	StatusRejected JobStatus = "rejected"
 )
 
-// JobResult is what a completed workflow reports back.
+// JobResult is what a completed workflow reports back. CostUSD is the
+// agent-reported estimate for the run (the full per-phase ledger is a
+// separate milestone).
 type JobResult struct {
-	Status JobStatus
-	PRURL  string
+	Status  JobStatus
+	PRURL   string
+	CostUSD float64
 }
 
 // Workspace is the isolated checkout a job runs in.
@@ -46,9 +52,17 @@ type Workspace struct {
 	Path string
 }
 
+// RunAgentInput carries what one agent run needs: where to work and what to
+// do.
+type RunAgentInput struct {
+	Workspace Workspace
+	Prompt    string
+}
+
 // AgentResult is the adapter-normalized outcome of one agent run.
 type AgentResult struct {
 	CostUSD float64
+	Output  string
 }
 
 // JudgeReport aggregates the verdicts of all judges for one attempt.
@@ -94,7 +108,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: runAgentMaxAttempts},
 	})
 	var agent AgentResult
-	if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, ws).Get(agentCtx, &agent); err != nil {
+	if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, RunAgentInput{Workspace: ws, Prompt: in.Prompt}).Get(agentCtx, &agent); err != nil {
 		return JobResult{}, err
 	}
 
@@ -109,7 +123,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 	}
 
 	if decision.Outcome != GatePass {
-		return JobResult{Status: StatusRejected}, nil
+		return JobResult{Status: StatusRejected, CostUSD: agent.CostUSD}, nil
 	}
 
 	var shipped ShipResult
@@ -117,5 +131,5 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		return JobResult{}, err
 	}
 
-	return JobResult{Status: StatusShipped, PRURL: shipped.PRURL}, nil
+	return JobResult{Status: StatusShipped, PRURL: shipped.PRURL, CostUSD: agent.CostUSD}, nil
 }

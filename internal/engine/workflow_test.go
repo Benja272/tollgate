@@ -36,7 +36,7 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 		Run(record("ship")).
 		Return(ShipResult{PRURL: "https://github.com/Benja272/tollgate/pull/1"}, nil)
 
-	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-1", Repo: "Benja272/tollgate", SourceRef: "issue-42"})
+	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-1", Repo: "Benja272/tollgate", SourceRef: "issue-42", Prompt: "implement the ticket"})
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -44,6 +44,7 @@ func TestJobWorkflow_HappyPath_RunsPhasesInOrderAndShips(t *testing.T) {
 	var result JobResult
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, StatusShipped, result.Status)
+	require.InDelta(t, 1.23, result.CostUSD, 1e-9, "agent cost must surface in the job result")
 	require.Equal(t, []string{"prepare", "run_agent", "judge", "gate", "ship"}, order)
 }
 

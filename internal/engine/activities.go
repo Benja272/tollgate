@@ -2,6 +2,9 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -19,6 +22,10 @@ const defaultHeartbeatInterval = 2 * time.Second
 // adapters at worker startup.
 type Activities struct {
 	Agent ports.AgentRunner
+
+	// WorkspaceRoot is where per-job workspaces are created; zero means the
+	// OS temp directory.
+	WorkspaceRoot string
 
 	// HeartbeatInterval overrides the agent-run heartbeat cadence; zero
 	// means defaultHeartbeatInterval. Tests shorten it.
@@ -38,14 +45,25 @@ func (a *Activities) beat(ctx context.Context) {
 	activity.RecordHeartbeat(ctx)
 }
 
+// Prepare creates the isolated workspace a job runs in. First cut: a fresh
+// directory per job under WorkspaceRoot; the git-worktree checkout of the
+// target repo is a later cycle.
 func (a *Activities) Prepare(ctx context.Context, in JobInput) (Workspace, error) {
-	panic("not implemented")
+	root := a.WorkspaceRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	path := filepath.Join(root, "tollgate-job-"+in.JobID)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return Workspace{}, fmt.Errorf("prepare workspace: %w", err)
+	}
+	return Workspace{Path: path}, nil
 }
 
 // RunAgent delegates to the AgentRunner port while heartbeating so the
 // server can detect a dead worker mid-run instead of waiting out the
 // activity timeout.
-func (a *Activities) RunAgent(ctx context.Context, ws Workspace) (AgentResult, error) {
+func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResult, error) {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -66,23 +84,30 @@ func (a *Activities) RunAgent(ctx context.Context, ws Workspace) (AgentResult, e
 		<-done
 	}()
 
-	res, err := a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: ws.Path})
+	res, err := a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
 	if err != nil {
 		return AgentResult{}, err
 	}
-	return AgentResult{CostUSD: res.CostUSD}, nil
+	return AgentResult{CostUSD: res.CostUSD, Output: res.Output}, nil
 }
 
+// Judge is scaffolding: the rubric engine and N-judge fan-out are the gate
+// milestone (ADR-0003); until then every attempt yields an empty report.
 func (a *Activities) Judge(ctx context.Context, ws Workspace) (JudgeReport, error) {
-	panic("not implemented")
+	return JudgeReport{}, nil
 }
 
+// DecideGate is scaffolding for the same milestone: with no verdicts there
+// is nothing to fail on, so the empty report passes. The real resolution
+// policy (fail-closed over blocking axes) replaces this.
 func (a *Activities) DecideGate(ctx context.Context, report JudgeReport) (GateDecision, error) {
-	panic("not implemented")
+	return GateDecision{Outcome: GatePass}, nil
 }
 
+// Ship is scaffolding: PR creation needs an idempotency design first
+// (ADR-0001 consequence), so it currently ships nothing and reports no URL.
 func (a *Activities) Ship(ctx context.Context, ws Workspace) (ShipResult, error) {
-	panic("not implemented")
+	return ShipResult{}, nil
 }
 
 func (a *Activities) heartbeatInterval() time.Duration {

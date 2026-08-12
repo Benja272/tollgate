@@ -29,7 +29,7 @@ func (a *crashActivities) Prepare(ctx context.Context, in JobInput) (Workspace, 
 	return Workspace{Path: "/tmp/crash-resume"}, nil
 }
 
-func (a *crashActivities) RunAgent(ctx context.Context, ws Workspace) (AgentResult, error) {
+func (a *crashActivities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResult, error) {
 	a.runAgentRuns.Add(1)
 	if activity.GetInfo(ctx).Attempt == 1 {
 		<-a.release
