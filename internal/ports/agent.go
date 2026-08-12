@@ -10,11 +10,22 @@ type RunSpec struct {
 	Prompt        string
 }
 
+// TokenUsage is the raw quantity behind a cost: what was actually consumed,
+// per pricing class. Tokens are the ground truth; USD is a valuation of
+// them at the price table of the moment.
+type TokenUsage struct {
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
 // RunResult is the adapter-normalized outcome of one agent run. CostUSD is
 // the agent-reported estimate (client-side, not authoritative billing);
 // adapters whose agent reports no cost must document how they derive it.
 type RunResult struct {
 	CostUSD   float64
+	Usage     TokenUsage
 	Output    string
 	SessionID string
 }

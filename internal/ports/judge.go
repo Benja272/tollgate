@@ -19,6 +19,7 @@ type JudgeRequest struct {
 type Judgment struct {
 	Verdict gate.Verdict
 	CostUSD float64
+	Usage   TokenUsage
 }
 
 // Judge scores one attempt against a rubric, independently of any other

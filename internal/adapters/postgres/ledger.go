@@ -35,10 +35,14 @@ func (l *Ledger) RecordCosts(ctx context.Context, entries []ports.CostEntry) err
 	for _, e := range entries {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO cost_entries
-			   (job_id, phase, actor, model, input_tokens, output_tokens, usd, attempt)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			   (job_id, phase, actor, model, input_tokens, output_tokens,
+			    cache_read_tokens, cache_creation_tokens, usd, attempt)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			 ON CONFLICT (job_id, phase, actor, attempt) DO NOTHING`,
-			e.JobID, e.Phase, e.Actor, e.Model, e.InputTokens, e.OutputTokens, e.USD, e.Attempt,
+			e.JobID, e.Phase, e.Actor, e.Model,
+			e.Usage.InputTokens, e.Usage.OutputTokens,
+			e.Usage.CacheReadTokens, e.Usage.CacheCreationTokens,
+			e.USD, e.Attempt,
 		); err != nil {
 			return fmt.Errorf("ledger: insert %s/%s/%s: %w", e.JobID, e.Phase, e.Actor, err)
 		}

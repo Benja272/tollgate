@@ -97,7 +97,7 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	if err != nil {
 		return AgentResult{}, err
 	}
-	return AgentResult{CostUSD: res.CostUSD, Output: res.Output}, nil
+	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output}, nil
 }
 
 // LoadRubric reads and content-addresses the rubric file. It is an

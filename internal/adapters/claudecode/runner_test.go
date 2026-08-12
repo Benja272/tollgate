@@ -22,7 +22,7 @@ func fakeClaude(t *testing.T, script string) string {
 }
 
 func TestRunner_Run_ParsesResultJSON(t *testing.T) {
-	bin := fakeClaude(t, `echo '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0123,"result":"implemented the ticket","session_id":"sess-1"}'`)
+	bin := fakeClaude(t, `echo '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0123,"result":"implemented the ticket","session_id":"sess-1","usage":{"input_tokens":10,"output_tokens":84,"cache_read_input_tokens":18282,"cache_creation_input_tokens":23716}}'`)
 	r := &Runner{Bin: bin}
 
 	got, err := r.Run(context.Background(), ports.RunSpec{
@@ -34,6 +34,12 @@ func TestRunner_Run_ParsesResultJSON(t *testing.T) {
 	require.InDelta(t, 0.0123, got.CostUSD, 1e-9)
 	require.Equal(t, "implemented the ticket", got.Output)
 	require.Equal(t, "sess-1", got.SessionID)
+	require.Equal(t, ports.TokenUsage{
+		InputTokens:         10,
+		OutputTokens:        84,
+		CacheReadTokens:     18282,
+		CacheCreationTokens: 23716,
+	}, got.Usage, "all four token classes must survive the adapter — cache tokens dominate cost")
 }
 
 func TestRunner_Run_RunsInsideWorkspace(t *testing.T) {

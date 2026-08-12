@@ -6,14 +6,13 @@ import "context"
 // job attempt. USD is a client-side estimate; the ledger still stores it
 // exactly (NUMERIC) so aggregates add up.
 type CostEntry struct {
-	JobID        string
-	Phase        string
-	Actor        string
-	Model        string
-	InputTokens  int64
-	OutputTokens int64
-	USD          float64
-	Attempt      int32
+	JobID   string
+	Phase   string
+	Actor   string
+	Model   string
+	Usage   TokenUsage
+	USD     float64
+	Attempt int32
 }
 
 // LedgerStore persists cost entries. Implementations must be idempotent on

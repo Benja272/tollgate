@@ -58,6 +58,7 @@ func (j *CLIJudge) Judge(ctx context.Context, req ports.JudgeRequest) (ports.Jud
 			Findings:      payload.Findings,
 		},
 		CostUSD: env.TotalCostUSD,
+		Usage:   env.Usage.toPort(),
 	}, nil
 }
 

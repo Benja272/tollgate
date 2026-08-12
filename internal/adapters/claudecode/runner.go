@@ -23,10 +23,30 @@ var _ ports.AgentRunner = (*Runner)(nil)
 // consumes. total_cost_usd is a client-side estimate, present under both
 // subscription and API-key auth.
 type resultEnvelope struct {
-	IsError      bool    `json:"is_error"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	Result       string  `json:"result"`
-	SessionID    string  `json:"session_id"`
+	IsError      bool          `json:"is_error"`
+	TotalCostUSD float64       `json:"total_cost_usd"`
+	Result       string        `json:"result"`
+	SessionID    string        `json:"session_id"`
+	Usage        envelopeUsage `json:"usage"`
+}
+
+// envelopeUsage carries the token classes the CLI reports. Cache tokens
+// matter: a 10-token prompt ships ~40k tokens of session context, and
+// without them the reported cost is inexplicable.
+type envelopeUsage struct {
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	CacheReadTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationTokens int64 `json:"cache_creation_input_tokens"`
+}
+
+func (u envelopeUsage) toPort() ports.TokenUsage {
+	return ports.TokenUsage{
+		InputTokens:         u.InputTokens,
+		OutputTokens:        u.OutputTokens,
+		CacheReadTokens:     u.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens,
+	}
 }
 
 func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, error) {
@@ -48,6 +68,7 @@ func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, 
 
 	return ports.RunResult{
 		CostUSD:   env.TotalCostUSD,
+		Usage:     env.Usage.toPort(),
 		Output:    env.Result,
 		SessionID: env.SessionID,
 	}, nil

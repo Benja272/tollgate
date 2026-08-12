@@ -33,9 +33,12 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 func entriesFor(jobID string) []ports.CostEntry {
 	return []ports.CostEntry{
-		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1},
-		{JobID: jobID, Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1},
-		{JobID: jobID, Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1},
+		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1,
+			Usage: ports.TokenUsage{InputTokens: 10, OutputTokens: 84, CacheReadTokens: 18282, CacheCreationTokens: 23716}},
+		{JobID: jobID, Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1,
+			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 60}},
+		{JobID: jobID, Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1,
+			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 55}},
 	}
 }
 
@@ -53,6 +56,16 @@ func TestLedger_RecordCosts_PersistsAndAggregates(t *testing.T) {
 		Scan(&rows, &total))
 	require.Equal(t, 3, rows)
 	require.InDelta(t, 1.082948, total, 1e-9, "the ledger must add up exactly")
+
+	var inTok, outTok, cacheRead, cacheCreate int64
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+		 FROM cost_entries WHERE job_id = $1 AND actor = 'agent'`, jobID).
+		Scan(&inTok, &outTok, &cacheRead, &cacheCreate))
+	require.Equal(t, int64(10), inTok)
+	require.Equal(t, int64(84), outTok)
+	require.Equal(t, int64(18282), cacheRead)
+	require.Equal(t, int64(23716), cacheCreate)
 }
 
 func TestLedger_RecordCosts_IsIdempotent(t *testing.T) {

@@ -77,6 +77,7 @@ type RunAgentInput struct {
 // AgentResult is the adapter-normalized outcome of one agent run.
 type AgentResult struct {
 	CostUSD float64
+	Usage   ports.TokenUsage
 	Output  string
 }
 
@@ -112,7 +113,8 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 	}
 
 	if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-		JobID: in.JobID, Phase: "run_agent", Actor: "agent", USD: agent.CostUSD, Attempt: 1,
+		JobID: in.JobID, Phase: "run_agent", Actor: "agent",
+		Usage: agent.Usage, USD: agent.CostUSD, Attempt: 1,
 	}}).Get(ctx, nil); err != nil {
 		return JobResult{}, err
 	}
@@ -153,7 +155,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		totalCost += judgment.CostUSD
 		judgeEntries[i] = ports.CostEntry{
 			JobID: in.JobID, Phase: "judge", Actor: "judge:" + models[i],
-			Model: models[i], USD: judgment.CostUSD, Attempt: 1,
+			Model: models[i], Usage: judgment.Usage, USD: judgment.CostUSD, Attempt: 1,
 		}
 	}
 	if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, judgeEntries).Get(ctx, nil); err != nil {
