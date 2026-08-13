@@ -220,7 +220,8 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		if int(attempt) > maxFixAttempts {
 			return JobResult{Status: StatusRejected, CostUSD: totalCost}, nil
 		}
-		prompt = repairPrompt(in.Prompt, rubric, decision, verdicts, attempt+1, int32(maxFixAttempts))
+		// Attempt N's failure buys repair N: the next run is attempt N+1.
+		prompt = repairPrompt(in.Prompt, rubric, decision, verdicts, int(attempt), maxFixAttempts)
 	}
 }
 
@@ -229,14 +230,14 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 // only ordered slices — decision.FailedBlocking is in rubric order, verdicts
 // in judge order — never a Go map, whose iteration order would make a replay
 // rebuild a different prompt.
-func repairPrompt(ticket string, r gate.Rubric, d gate.Decision, verdicts []gate.Verdict, attempt, maxFixAttempts int32) string {
+func repairPrompt(ticket string, r gate.Rubric, d gate.Decision, verdicts []gate.Verdict, fixAttempt, maxFixAttempts int) string {
 	var b strings.Builder
 	b.WriteString(ticket)
 	b.WriteString("\n\n--- QUALITY GATE FEEDBACK ---\n\n")
 	fmt.Fprintf(&b, "Your previous attempt was rejected by the quality gate (rubric %s, policy %s).\n",
 		d.RubricVersion, d.Policy)
-	fmt.Fprintf(&b, "This is repair attempt %d of %d; after that the job is rejected for good.\n\n",
-		attempt-1, maxFixAttempts)
+	fmt.Fprintf(&b, "This is repair attempt %d of %d; after the last one the job is rejected for good.\n\n",
+		fixAttempt, maxFixAttempts)
 
 	b.WriteString("Blocking axes that failed:\n")
 	for _, axis := range d.FailedBlocking {
