@@ -84,7 +84,10 @@ type Workspace struct {
 // attempts whose Prompt restates the ticket plus the gate findings to repair
 // (ADR-0003). Journaling the attempt number keeps every run self-describing
 // in the workflow history, which is the audit trail the ledger joins against.
+// JobID is along for telemetry — it ties the run's span to the job the
+// ledger bills.
 type RunAgentInput struct {
+	JobID     string
 	Workspace Workspace
 	Prompt    string
 	Attempt   int32
@@ -160,7 +163,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 
 		var agent AgentResult
 		if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, RunAgentInput{
-			Workspace: ws, Prompt: prompt, Attempt: attempt,
+			JobID: in.JobID, Workspace: ws, Prompt: prompt, Attempt: attempt,
 		}).Get(agentCtx, &agent); err != nil {
 			return JobResult{}, err
 		}
@@ -178,6 +181,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 		futures := make([]workflow.Future, len(models))
 		for i, model := range models {
 			futures[i] = workflow.ExecuteActivity(ctx, acts.JudgeOne, JudgeInput{
+				JobID:  in.JobID,
 				Model:  model,
 				Change: agent.Output,
 				Ticket: in.Prompt,

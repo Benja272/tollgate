@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
@@ -15,9 +16,14 @@ import (
 	"github.com/Benja272/tollgate/internal/adapters/postgres"
 	"github.com/Benja272/tollgate/internal/engine"
 	"github.com/Benja272/tollgate/internal/ports"
+	"github.com/Benja272/tollgate/internal/telemetry"
 )
 
 const defaultDatabaseURL = "postgres://tollgate:tollgate@localhost:5432/tollgate?sslmode=disable"
+
+// shutdownTimeout bounds the final telemetry flush; an unreachable collector
+// must not hold the process open.
+const shutdownTimeout = 5 * time.Second
 
 func main() {
 	c, err := client.Dial(client.Options{})
@@ -36,10 +42,27 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Telemetry is best-effort by construction: a failed setup logs and the
+	// worker runs blind rather than not running at all.
+	instruments, shutdownTelemetry, err := telemetry.Setup(context.Background(), telemetry.ConfigFromEnv())
+	if err != nil {
+		log.Printf("telemetry disabled (setup failed): %v", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := shutdownTelemetry(ctx); err != nil {
+				log.Printf("telemetry shutdown: %v", err)
+			}
+		}()
+	}
+
 	w := worker.New(c, engine.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(engine.JobWorkflow)
 	w.RegisterActivity(&engine.Activities{
-		Agent: &claudecode.Runner{Bin: "claude"},
+		Agent:     &claudecode.Runner{Bin: "claude"},
+		AgentName: "claude-code",
+		Telemetry: instruments,
 		Judges: map[string]ports.Judge{
 			"haiku":  &claudecode.CLIJudge{Bin: "claude", Model: "haiku"},
 			"sonnet": &claudecode.CLIJudge{Bin: "claude", Model: "sonnet"},

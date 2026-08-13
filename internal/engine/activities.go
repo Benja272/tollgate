@@ -12,12 +12,17 @@ import (
 
 	"github.com/Benja272/tollgate/internal/gate"
 	"github.com/Benja272/tollgate/internal/ports"
+	"github.com/Benja272/tollgate/internal/telemetry"
 )
 
 // defaultHeartbeatInterval must stay well under the RunAgent
 // HeartbeatTimeout (5s) so a single delayed beat never reads as a dead
 // worker.
 const defaultHeartbeatInterval = 2 * time.Second
+
+// defaultAgentName labels the agent span when the wiring names no agent. The
+// engine only knows the port, never which harness is behind it (ADR-0002).
+const defaultAgentName = "coding-agent"
 
 // Activities holds every side-effecting step of the job pipeline. It is the
 // engine's dependency-injection point: fields are ports, wired to concrete
@@ -39,6 +44,14 @@ type Activities struct {
 	// HeartbeatInterval overrides the agent-run heartbeat cadence; zero
 	// means defaultHeartbeatInterval. Tests shorten it.
 	HeartbeatInterval time.Duration
+
+	// AgentName names the wrapped harness in agent spans (gen_ai.agent.name);
+	// zero means defaultAgentName.
+	AgentName string
+
+	// Telemetry records spans and metrics for the paid calls. Nil is a
+	// working no-op: observability never gates job execution.
+	Telemetry *telemetry.Instruments
 
 	// heartbeat is the beat sink, injectable by tests; nil means
 	// activity.RecordHeartbeat (the SDK test environment batches heartbeats,
@@ -71,8 +84,22 @@ func (a *Activities) Prepare(ctx context.Context, in JobInput) (Workspace, error
 
 // RunAgent delegates to the AgentRunner port while heartbeating so the
 // server can detect a dead worker mid-run instead of waiting out the
-// activity timeout.
+// activity timeout. The run is the job's largest spend, so it is also where
+// the `invoke_agent` span and the cost metric are emitted (DESIGN.md §4).
 func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResult, error) {
+	// Attempt 1 is the original agent; later attempts are the fix loop's
+	// fixer actor (ADR-0003) — the span must agree with the ledger on that.
+	actor := "agent"
+	if in.Attempt > 1 {
+		actor = "fixer"
+	}
+	ctx, rec := a.Telemetry.StartInvokeAgent(ctx, telemetry.Call{
+		JobID:     in.JobID,
+		Phase:     "run_agent",
+		Actor:     actor,
+		AgentName: a.agentName(),
+	})
+
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -94,6 +121,7 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	}()
 
 	res, err := a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
+	rec.End(ctx, telemetry.Result{Usage: res.Usage, CostUSD: res.CostUSD}, err)
 	if err != nil {
 		return AgentResult{}, err
 	}
@@ -109,6 +137,7 @@ func (a *Activities) LoadRubric(ctx context.Context, path string) (gate.Rubric, 
 
 // JudgeInput is one judgment request: which judge model, over what change.
 type JudgeInput struct {
+	JobID  string
 	Model  string
 	Change string
 	Ticket string
@@ -124,7 +153,28 @@ func (a *Activities) JudgeOne(ctx context.Context, in JudgeInput) (ports.Judgmen
 		return ports.Judgment{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("no judge wired for model %q", in.Model), "JudgeConfig", nil)
 	}
-	return j.Judge(ctx, ports.JudgeRequest{Diff: in.Change, Ticket: in.Ticket, Rubric: in.Rubric})
+
+	// A judgment is a paid model call like the agent run, so it carries the
+	// same span shape — actor and model included, since "which judge cost
+	// what" is a first-class ledger question.
+	call := telemetry.Call{
+		JobID:     in.JobID,
+		Phase:     "judge",
+		Actor:     "judge:" + in.Model,
+		AgentName: "judge:" + in.Model,
+		Model:     in.Model,
+	}
+	ctx, rec := a.Telemetry.StartInvokeAgent(ctx, call)
+
+	judgment, err := j.Judge(ctx, ports.JudgeRequest{Diff: in.Change, Ticket: in.Ticket, Rubric: in.Rubric})
+	if err == nil {
+		a.Telemetry.RecordJudgeScores(ctx, call, judgment.Verdict.RubricVersion, judgment.Verdict.Scores)
+	}
+	rec.End(ctx, telemetry.Result{Usage: judgment.Usage, CostUSD: judgment.CostUSD}, err)
+	if err != nil {
+		return ports.Judgment{}, err
+	}
+	return judgment, nil
 }
 
 // DecideInput carries the verdicts and the rubric they were judged against.
@@ -150,6 +200,13 @@ func (a *Activities) RecordCosts(ctx context.Context, entries []ports.CostEntry)
 // (ADR-0001 consequence), so it currently ships nothing and reports no URL.
 func (a *Activities) Ship(ctx context.Context, ws Workspace) (ShipResult, error) {
 	return ShipResult{}, nil
+}
+
+func (a *Activities) agentName() string {
+	if a.AgentName != "" {
+		return a.AgentName
+	}
+	return defaultAgentName
 }
 
 func (a *Activities) heartbeatInterval() time.Duration {

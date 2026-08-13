@@ -26,11 +26,11 @@ func TestDecide_FailClosed(t *testing.T) {
 	r := testRubric(t) // correctness: blocking, min 4 — clarity: advisory, min 3
 
 	cases := []struct {
-		name            string
-		verdicts        func(t *testing.T) []Verdict
-		outcome         Outcome
-		failedBlocking  []string
-		failedAdvisory  []string
+		name           string
+		verdicts       func(t *testing.T) []Verdict
+		outcome        Outcome
+		failedBlocking []string
+		failedAdvisory []string
 	}{
 		{
 			name: "unanimous pass",

@@ -1,0 +1,57 @@
+# OpenTelemetry Collector configuration for the local tollgate stack.
+#
+# Metrics: received over OTLP from the worker and exposed for Prometheus to
+# scrape. The worker emits cost and token metrics directly (see deploy/README.md
+# for why they are not derived from spans with the spanmetrics connector).
+#
+# Traces: logged. Spans are the per-call detail view (which job, which judge,
+# which model, what it cost); swapping the debug exporter for Tempo is a
+# two-line change documented in deploy/README.md.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Promote resource attributes (service.name) to labels so a dashboard can
+    # filter by service without joining against target_info.
+    resource_to_telemetry_conversion:
+      enabled: true
+    enable_open_metrics: true
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

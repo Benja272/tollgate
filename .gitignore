@@ -5,3 +5,6 @@
 /bin/
 *.test
 *.out
+
+# Agent worktrees
+.claude/worktrees/

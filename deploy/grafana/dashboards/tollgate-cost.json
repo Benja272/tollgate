@@ -1,0 +1,245 @@
+{
+  "uid": "tollgate-cost",
+  "title": "Tollgate — cost and gate quality",
+  "description": "What tollgate jobs spend and how the gate scores them. Metrics are emitted by the worker over OTLP and scraped from the collector; per-job cost of record lives in the PostgreSQL ledger (ADR-0004).",
+  "tags": ["tollgate", "cost", "genai"],
+  "timezone": "browser",
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "actor",
+        "label": "Actor",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+        "query": "label_values(tollgate_cost_usd_total, tollgate_actor)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total cost (selected range)",
+      "description": "Sum of tollgate.cost.usd — the custom attribute/metric documented in ADR-0005; the GenAI registry defines no cost attribute.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum(increase(tollgate_cost_usd_total{tollgate_actor=~\"$actor\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "cost"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total tokens (selected range)",
+      "description": "gen_ai.client.token.usage across every class, including the Anthropic cache classes tollgate adds to the open gen_ai.token.type enum.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum(increase(gen_ai_client_token_usage_sum{tollgate_actor=~\"$actor\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "tokens"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Average judge score (selected range)",
+      "description": "Mean of tollgate.judge.score over every axis and judge. A drifting mean is the first symptom of a silently revised judge snapshot.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 1,
+          "max": 5,
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 3 }, { "color": "green", "value": 4 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum(increase(tollgate_judge_score_sum[$__range])) / sum(increase(tollgate_judge_score_count[$__range]))",
+          "instant": true,
+          "legendFormat": "avg score"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cost rate by actor (USD/hour)",
+      "description": "Burn rate split by ledger actor: agent vs each judge model.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum by (tollgate_actor) (rate(tollgate_cost_usd_total{tollgate_actor=~\"$actor\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{tollgate_actor}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Cost by actor (selected range)",
+      "description": "Where the money went: the agent run, or the judges that gate it. Judges cheap enough to run N-of are the whole economic argument for the gate.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum by (tollgate_actor) (increase(tollgate_cost_usd_total{tollgate_actor=~\"$actor\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "{{tollgate_actor}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Cost per job — top 10 (selected range)",
+      "description": "Requires TOLLGATE_METRICS_JOB_ID=true on the worker: job ids are unbounded, so they are OFF metrics by default (see deploy/README.md). Without the flag this panel is empty by design — per-job cost of record is the PostgreSQL ledger, and per-job detail is on the spans.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "decimals": 4, "color": { "mode": "continuous-BlPu" } },
+        "overrides": []
+      },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "topk(10, sum by (tollgate_job_id) (increase(tollgate_cost_usd_total[$__range])))",
+          "instant": true,
+          "legendFormat": "{{tollgate_job_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tokens by class",
+      "description": "input / output / cache_read / cache_creation. Cache classes dominate agent runs: a 10-token prompt ships tens of thousands of cached context tokens, and without them a reported cost looks inexplicable.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum by (gen_ai_token_type) (increase(gen_ai_client_token_usage_sum{tollgate_actor=~\"$actor\"}[$__rate_interval]))",
+          "legendFormat": "{{gen_ai_token_type}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Judge score distribution (cumulative buckets)",
+      "description": "Counts of scores at or below each bucket boundary on the rubric's 1..5 scale. A gate whose judges only ever emit 4s and 5s is not gating anything.",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "continuous-GrYlRd" } },
+        "overrides": []
+      },
+      "options": { "displayMode": "basic", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum by (le) (increase(tollgate_judge_score_bucket[$__range]))",
+          "instant": true,
+          "legendFormat": "score <= {{le}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Average judge score by model and axis",
+      "description": "Per-model calibration view: two judges scoring the same rubric far apart is the disagreement the resolution policy has to absorb (ADR-0003).",
+      "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 1,
+          "max": 5,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "always", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "tollgate-prometheus" },
+          "expr": "sum by (gen_ai_request_model, tollgate_rubric_axis) (increase(tollgate_judge_score_sum[$__rate_interval])) / sum by (gen_ai_request_model, tollgate_rubric_axis) (increase(tollgate_judge_score_count[$__rate_interval]))",
+          "legendFormat": "{{gen_ai_request_model}} / {{tollgate_rubric_axis}}"
+        }
+      ]
+    }
+  ]
+}

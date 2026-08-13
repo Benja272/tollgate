@@ -19,4 +19,35 @@ Why both, in one number: on SWE-bench (bash-only, 2026) one model scores
 indistinguishable quality — invisible without per-job metering, unusable
 without a gate that lets you take the cheap option safely.
 
+## Telemetry: why there is a custom cost attribute
+
+Every paid call — the agent run and each judge — emits an OpenTelemetry
+`invoke_agent` span following the GenAI semantic conventions, with tokens
+under `gen_ai.usage.*` and the model under `gen_ai.request.model`.
+
+Cost is not in those conventions. The GenAI attribute registry defines token
+counts, models, and providers, and **no cost attribute at all** — which is
+exactly the gap this project is about. Tollgate therefore emits its own,
+namespaced so it can never collide with a future registry attribute:
+
+```
+tollgate.cost.usd = 1.75    # float64 USD, alongside gen_ai.* on the same span
+```
+
+The same number is emitted as a metric (`tollgate_cost_usd_total` in
+Prometheus), split by actor, phase, and model. The naming, the pinned semconv
+version, and the risk that these conventions are Development-stability and now
+live in a separate repository are documented in
+[ADR-0005](docs/adr/0005-custom-cost-attribute.md).
+
+A local stack that shows it — collector, Prometheus, and a provisioned Grafana
+dashboard, all as code — is one command away:
+
+```sh
+docker compose -f deploy/docker-compose.observability.yml up -d
+```
+
+See [`deploy/README.md`](deploy/README.md) for the panels, the configuration,
+and why metrics are emitted by the worker instead of derived from spans.
+
 Status: design phase. See `docs/DESIGN.md` and `docs/adr/`.
