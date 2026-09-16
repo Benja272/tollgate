@@ -68,6 +68,74 @@ func TestLedger_RecordCosts_PersistsAndAggregates(t *testing.T) {
 	require.Equal(t, int64(23716), cacheCreate)
 }
 
+func TestLedger_RecordCosts_PieceIDGiven_RecordedOnEveryRow(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-piece-%d", time.Now().UnixNano())
+	entries := entriesFor(jobID)
+	for i := range entries {
+		entries[i].PieceID = "piece-77"
+	}
+	require.NoError(t, l.RecordCosts(context.Background(), entries))
+
+	rows, err := pool.Query(context.Background(), `SELECT piece_id FROM cost_entries WHERE job_id = $1`, jobID)
+	require.NoError(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var pieceID string
+		require.NoError(t, rows.Scan(&pieceID))
+		require.Equal(t, "piece-77", pieceID)
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 3, count)
+}
+
+func TestLedger_RecordCosts_PieceIDOmitted_NullOnEveryRow(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-nopiece-%d", time.Now().UnixNano())
+	require.NoError(t, l.RecordCosts(context.Background(), entriesFor(jobID)))
+
+	rows, err := pool.Query(context.Background(), `SELECT piece_id FROM cost_entries WHERE job_id = $1`, jobID)
+	require.NoError(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var pieceID *string
+		require.NoError(t, rows.Scan(&pieceID))
+		require.Nil(t, pieceID, "piece_id must be NULL, not an empty string, when omitted")
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 3, count)
+}
+
+func TestLedger_PerPieceSpend_SumsAcrossJobsIncludingFailed(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	piece := fmt.Sprintf("piece-spend-%d", time.Now().UnixNano())
+
+	// job3 simulates a job that failed after the agent ran: only its
+	// run_agent row exists, no judge rows — spend must still include it.
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job1", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 1.0, Attempt: 1, PieceID: piece},
+	}))
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job2", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 2.0, Attempt: 1, PieceID: piece},
+	}))
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job3", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.5, Attempt: 1, PieceID: piece},
+	}))
+
+	spend, err := l.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, err)
+	require.Len(t, spend, 1)
+	require.Equal(t, "sonnet", spend[0].Model)
+	require.InDelta(t, 3.5, spend[0].USD, 1e-9, "per-piece spend must include the failed job's recorded row")
+}
+
 func TestLedger_RecordCosts_IsIdempotent(t *testing.T) {
 	pool := testPool(t)
 	l := NewLedger(pool)

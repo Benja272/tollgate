@@ -36,16 +36,47 @@ func (l *Ledger) RecordCosts(ctx context.Context, entries []ports.CostEntry) err
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO cost_entries
 			   (job_id, phase, actor, model, input_tokens, output_tokens,
-			    cache_read_tokens, cache_creation_tokens, usd, attempt)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			    cache_read_tokens, cache_creation_tokens, usd, attempt, piece_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''))
 			 ON CONFLICT (job_id, phase, actor, attempt) DO NOTHING`,
 			e.JobID, e.Phase, e.Actor, e.Model,
 			e.Usage.InputTokens, e.Usage.OutputTokens,
 			e.Usage.CacheReadTokens, e.Usage.CacheCreationTokens,
-			e.USD, e.Attempt,
+			e.USD, e.Attempt, e.PieceID,
 		); err != nil {
 			return fmt.Errorf("ledger: insert %s/%s/%s: %w", e.JobID, e.Phase, e.Actor, err)
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// PieceSpend is one model's total spend for a piece, summed across every
+// job that shares its piece_id, regardless of job outcome.
+type PieceSpend struct {
+	Model string
+	USD   float64
+}
+
+// PerPieceSpend sums cost_entries by model for one piece_id (ADR-0006 D13):
+// SUM across every job's recorded rows, whether or not that job's workflow
+// ultimately succeeded — a job that failed after the agent ran still
+// contributes its run_agent row.
+func (l *Ledger) PerPieceSpend(ctx context.Context, pieceID string) ([]PieceSpend, error) {
+	rows, err := l.pool.Query(ctx,
+		`SELECT model, COALESCE(SUM(usd), 0) FROM cost_entries
+		 WHERE piece_id = $1 GROUP BY model ORDER BY model`, pieceID)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: per-piece spend for %s: %w", pieceID, err)
+	}
+	defer rows.Close()
+
+	var out []PieceSpend
+	for rows.Next() {
+		var s PieceSpend
+		if err := rows.Scan(&s.Model, &s.USD); err != nil {
+			return nil, fmt.Errorf("ledger: scan per-piece spend for %s: %w", pieceID, err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
