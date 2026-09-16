@@ -483,3 +483,41 @@ func TestJobWorkflow_ActivityFailure_PropagatesAndShortCircuits(t *testing.T) {
 		})
 	}
 }
+
+// TestJobWorkflow_BilledFailure_RecordsAgentRowAndNeverCallsJudgeOne is the
+// PR-shaped JobWorkflow half of [Spec: cost-ledger#Billed Failure Is
+// Recorded Before the Job Fails]: a billed agent failure must still land its
+// run_agent cost row, then fail the job without ever reaching the gate.
+func TestJobWorkflow_BilledFailure_RecordsAgentRowAndNeverCallsJudgeOne(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	var acts *Activities
+	env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/job-billed"}, nil)
+	env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).
+		Return(gate.Rubric{Name: "test", Version: "sha256:abc", Axes: []gate.Axis{{Name: "correctness", Blocking: true, MinScore: 4}}}, nil)
+
+	billed := AgentResult{CostUSD: 0.42, Model: "claude-3-5-haiku"}
+	boom := temporal.NewNonRetryableApplicationError("agent reported is_error=true", "AgentRunBilled", nil, billed)
+	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{}, boom)
+
+	var recorded []ports.CostEntry
+	env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			recorded = append(recorded, args.Get(1).([]ports.CostEntry)...)
+		}).
+		Return(nil)
+
+	env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-billed", Repo: "Benja272/tollgate", SourceRef: "issue-billed", Prompt: "p"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+
+	require.Len(t, recorded, 1)
+	require.Equal(t, "job-billed", recorded[0].JobID)
+	require.Equal(t, "claude-3-5-haiku", recorded[0].Model)
+	require.InDelta(t, 0.42, recorded[0].USD, 1e-9)
+
+	env.AssertNotCalled(t, "JudgeOne", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
+}

@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -93,11 +94,70 @@ type RunAgentInput struct {
 	Attempt   int32
 }
 
-// AgentResult is the adapter-normalized outcome of one agent run.
+// AgentResult is the adapter-normalized outcome of one agent run. Model is
+// the resolved model id (ADR-0006 D4); it rides on both success and on a
+// billed failure's error details, since either way a ledger row needs it.
 type AgentResult struct {
 	CostUSD float64
 	Usage   ports.TokenUsage
 	Output  string
+	Model   string
+}
+
+// errTypeAgentRunBilled is the temporal.ApplicationError.Type() RunAgent
+// reports when the harness produced a parseable result envelope before
+// failing (ADR-0006 D14): the run was billed, so its cost row must be
+// recorded before the job fails. Any other error type means nothing was
+// billed — a crash or a kill — and nothing is recorded.
+const errTypeAgentRunBilled = "AgentRunBilled"
+
+// runAgentAndRecord runs the agent and journals its cost row, on success AND
+// on a billed failure (ADR-0006 D14). It is shared between JobWorkflow and
+// ArtifactJobWorkflow so the billed-failure accounting fix applies to both
+// job shapes identically. agentCtx carries the agent's own activity options
+// (heartbeat, retry policy); ctx carries the cheaper RecordCosts write.
+//
+// On success: records the row, returns the result.
+// On an AgentRunBilled application error: extracts the partial AgentResult
+// from the error's details, records that row, then returns the error
+// unchanged (still non-retryable) — the row is guaranteed to be recorded
+// before this function returns the error.
+// On any other error (a crash or a kill — no parseable envelope, nothing was
+// billed): records nothing and returns the error unchanged, retryable as
+// today.
+func runAgentAndRecord(agentCtx, ctx workflow.Context, run RunAgentInput, actor, pieceID string) (AgentResult, error) {
+	var acts *Activities
+
+	var agent AgentResult
+	err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, run).Get(agentCtx, &agent)
+	if err == nil {
+		if recErr := recordAgentCost(ctx, run, actor, agent); recErr != nil {
+			return AgentResult{}, recErr
+		}
+		return agent, nil
+	}
+
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == errTypeAgentRunBilled {
+		var billed AgentResult
+		if detailsErr := appErr.Details(&billed); detailsErr == nil {
+			if recErr := recordAgentCost(ctx, run, actor, billed); recErr != nil {
+				return AgentResult{}, recErr
+			}
+		}
+	}
+	return AgentResult{}, err
+}
+
+// recordAgentCost journals one run_agent cost row. pieceID is threaded
+// through the call signature for ArtifactJobWorkflow (Task 10); ports.CostEntry
+// gains the field to carry it in a later work unit.
+func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor string, agent AgentResult) error {
+	var acts *Activities
+	return workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
+		JobID: run.JobID, Phase: "run_agent", Actor: actor,
+		Model: agent.Model, Usage: agent.Usage, USD: agent.CostUSD, Attempt: run.Attempt,
+	}}).Get(ctx, nil)
 }
 
 // ShipResult reports the PR created for a passing job.
@@ -161,20 +221,13 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 			actor = "agent"
 		}
 
-		var agent AgentResult
-		if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, RunAgentInput{
+		agent, err := runAgentAndRecord(agentCtx, ctx, RunAgentInput{
 			JobID: in.JobID, Workspace: ws, Prompt: prompt, Attempt: attempt,
-		}).Get(agentCtx, &agent); err != nil {
+		}, actor, "")
+		if err != nil {
 			return JobResult{}, err
 		}
 		totalCost += agent.CostUSD
-
-		if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-			JobID: in.JobID, Phase: "run_agent", Actor: actor,
-			Usage: agent.Usage, USD: agent.CostUSD, Attempt: attempt,
-		}}).Get(ctx, nil); err != nil {
-			return JobResult{}, err
-		}
 
 		// One activity per judge, all in flight at once: each judgment is
 		// journaled, retried, and costed independently (ADR-0003).
