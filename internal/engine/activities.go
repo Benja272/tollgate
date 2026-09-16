@@ -14,6 +14,7 @@ import (
 	"github.com/Benja272/tollgate/internal/gate"
 	"github.com/Benja272/tollgate/internal/ports"
 	"github.com/Benja272/tollgate/internal/telemetry"
+	"github.com/Benja272/tollgate/internal/workspace"
 )
 
 // defaultHeartbeatInterval must stay well under the RunAgent
@@ -30,6 +31,10 @@ const defaultAgentName = "coding-agent"
 // adapters at worker startup.
 type Activities struct {
 	Agent ports.AgentRunner
+
+	// Checkout prepares an artifact job's workspace as a pinned git
+	// worktree (ADR-0006 D5, D6).
+	Checkout ports.Checkout
 
 	// Judges maps a judge model name to its implementation; JudgeModels in
 	// JobInput select from here.
@@ -68,6 +73,33 @@ func (a *Activities) beat(ctx context.Context) {
 	activity.RecordHeartbeat(ctx)
 }
 
+// withHeartbeat runs work while heartbeating on a ticker in the background,
+// stopping cleanly the moment work returns. Extracted from RunAgent's
+// original inline loop so every long-running activity (RunAgent,
+// ApplyOverlay) heartbeats identically through the same seam.
+func (a *Activities) withHeartbeat(ctx context.Context, work func() error) error {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(a.heartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.beat(ctx)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	return work()
+}
+
 // Prepare creates the isolated workspace a job runs in. First cut: a fresh
 // directory per job under WorkspaceRoot; the git-worktree checkout of the
 // target repo is a later cycle.
@@ -101,27 +133,12 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 		AgentName: a.agentName(),
 	})
 
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(a.heartbeatInterval())
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				a.beat(ctx)
-			case <-stop:
-				return
-			}
-		}
-	}()
-	defer func() {
-		close(stop)
-		<-done
-	}()
-
-	res, err := a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
+	var res ports.RunResult
+	err := a.withHeartbeat(ctx, func() error {
+		var runErr error
+		res, runErr = a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
+		return runErr
+	})
 	rec.End(ctx, telemetry.Result{Usage: res.Usage, CostUSD: res.CostUSD, Model: res.Model}, err)
 	if err != nil {
 		// A *ports.RunError means the harness produced a parseable result
@@ -150,6 +167,44 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 			"job_id", in.JobID, "attempt", in.Attempt)
 	}
 	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model}, nil
+}
+
+// CheckoutInput identifies the pinned checkout an artifact job needs.
+type CheckoutInput struct {
+	Repo      string
+	SourceRef string
+	Path      string
+}
+
+// CheckoutWorkspace delegates to the Checkout port: a pinned, detached git
+// worktree at exactly SourceRef, with repository hooks disabled (ADR-0006
+// D5, D6). It is its own activity, distinct from ApplyOverlay and the agent
+// run, so a checkout retry never re-runs — and re-bills — either.
+func (a *Activities) CheckoutWorkspace(ctx context.Context, in CheckoutInput) (Workspace, error) {
+	if err := a.Checkout.Checkout(ctx, in.Repo, in.SourceRef, in.Path); err != nil {
+		return Workspace{}, err
+	}
+	return Workspace{Path: in.Path}, nil
+}
+
+// OverlayInput carries what ApplyOverlay needs to place prepared files onto
+// a checked-out workspace, bounded to declared destination roots.
+type OverlayInput struct {
+	Workspace        Workspace
+	DestinationRoots []string
+	Overlays         []workspace.Overlay
+}
+
+// ApplyOverlay places every overlay onto the workspace (ADR-0006 D9-D11). It
+// is its own activity, distinct from the agent run, so an overlay failure
+// never invokes — and never bills — the agent (workspace-preparation#Overlay
+// Failure Isolation). It heartbeats through the same seam as RunAgent, both
+// via the background ticker in withHeartbeat and via workspace.Apply's
+// per-overlay beat callback, since a large overlay can take a while.
+func (a *Activities) ApplyOverlay(ctx context.Context, in OverlayInput) error {
+	return a.withHeartbeat(ctx, func() error {
+		return workspace.Apply(ctx, in.Workspace.Path, in.DestinationRoots, in.Overlays, func() { a.beat(ctx) })
+	})
 }
 
 // LoadRubric reads and content-addresses the rubric file. It is an

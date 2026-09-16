@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/Benja272/tollgate/internal/ports"
+	"github.com/Benja272/tollgate/internal/workspace"
 )
 
 // slowRunner simulates an agent run that takes a while, so the activity has
@@ -150,6 +152,82 @@ func TestActivities_RunAgent_UnknownModel_LogsWarningNoFailure(t *testing.T) {
 	var got AgentResult
 	require.NoError(t, val.Get(&got))
 	require.Equal(t, ports.ModelUnknown, got.Model)
+}
+
+// fakeCheckout records its call and returns a configurable error, so
+// CheckoutWorkspace tests never touch real git.
+type fakeCheckout struct {
+	gotRepo, gotSHA, gotPath string
+	err                      error
+}
+
+func (f *fakeCheckout) Checkout(ctx context.Context, repo, sha, path string) error {
+	f.gotRepo, f.gotSHA, f.gotPath = repo, sha, path
+	return f.err
+}
+
+func TestActivities_CheckoutWorkspace_DelegatesToPort(t *testing.T) {
+	fc := &fakeCheckout{}
+	acts := &Activities{Checkout: fc}
+
+	got, err := acts.CheckoutWorkspace(context.Background(), CheckoutInput{
+		Repo: "/abs/repo", SourceRef: "abc123", Path: "/tmp/ws-1",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, Workspace{Path: "/tmp/ws-1"}, got)
+	require.Equal(t, "/abs/repo", fc.gotRepo)
+	require.Equal(t, "abc123", fc.gotSHA)
+	require.Equal(t, "/tmp/ws-1", fc.gotPath)
+}
+
+func TestActivities_CheckoutWorkspace_PropagatesPortError(t *testing.T) {
+	fc := &fakeCheckout{err: ports.ErrRefNotFound}
+	acts := &Activities{Checkout: fc}
+
+	_, err := acts.CheckoutWorkspace(context.Background(), CheckoutInput{Repo: "/abs/repo", SourceRef: "x", Path: "/tmp/ws-2"})
+
+	require.ErrorIs(t, err, ports.ErrRefNotFound)
+}
+
+func TestActivities_ApplyOverlay_HeartbeatsDuringLongCopy(t *testing.T) {
+	ws := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "output"), 0o755))
+	srcDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte("b"), 0o644))
+
+	var beats atomic.Int32
+	acts := &Activities{heartbeat: func(context.Context) { beats.Add(1) }}
+
+	err := acts.ApplyOverlay(context.Background(), OverlayInput{
+		Workspace:        Workspace{Path: ws},
+		DestinationRoots: []string{"output"},
+		Overlays:         []workspace.Overlay{{Source: srcDir, Dest: "output/copied"}},
+	})
+
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, beats.Load(), int32(1), "ApplyOverlay must heartbeat via the same seam as RunAgent")
+}
+
+func TestWithHeartbeat_StopsCleanlyOnCompletion(t *testing.T) {
+	var beats atomic.Int32
+	acts := &Activities{
+		HeartbeatInterval: 20 * time.Millisecond,
+		heartbeat:         func(context.Context) { beats.Add(1) },
+	}
+
+	err := acts.withHeartbeat(context.Background(), func() error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, beats.Load(), int32(2))
+
+	final := beats.Load()
+	time.Sleep(80 * time.Millisecond)
+	require.Equal(t, final, beats.Load(), "heartbeating must stop once work completes")
 }
 
 func TestActivities_Prepare_CreatesIsolatedWorkspacePerJob(t *testing.T) {
