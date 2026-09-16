@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -92,6 +93,10 @@ type RunAgentInput struct {
 	Workspace Workspace
 	Prompt    string
 	Attempt   int32
+	// AgentConfig is opaque to the engine (ADR-0002); it crosses to the
+	// adapter unchanged via ports.RunSpec. Empty for JobWorkflow (today's
+	// PR-shape arguments, unchanged); set for ArtifactJobWorkflow.
+	AgentConfig json.RawMessage
 }
 
 // AgentResult is the adapter-normalized outcome of one agent run. Model is

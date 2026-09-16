@@ -100,15 +100,21 @@ func (a *Activities) withHeartbeat(ctx context.Context, work func() error) error
 	return work()
 }
 
+// workspaceRoot resolves where per-job workspaces are created: WorkspaceRoot
+// when set, else the OS temp directory. Shared by Prepare and
+// CheckoutWorkspace so both job shapes place workspaces the same way.
+func (a *Activities) workspaceRoot() string {
+	if a.WorkspaceRoot != "" {
+		return a.WorkspaceRoot
+	}
+	return os.TempDir()
+}
+
 // Prepare creates the isolated workspace a job runs in. First cut: a fresh
 // directory per job under WorkspaceRoot; the git-worktree checkout of the
 // target repo is a later cycle.
 func (a *Activities) Prepare(ctx context.Context, in JobInput) (Workspace, error) {
-	root := a.WorkspaceRoot
-	if root == "" {
-		root = os.TempDir()
-	}
-	path := filepath.Join(root, "tollgate-job-"+in.JobID)
+	path := filepath.Join(a.workspaceRoot(), "tollgate-job-"+in.JobID)
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return Workspace{}, fmt.Errorf("prepare workspace: %w", err)
 	}
@@ -136,7 +142,9 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	var res ports.RunResult
 	err := a.withHeartbeat(ctx, func() error {
 		var runErr error
-		res, runErr = a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
+		res, runErr = a.Agent.Run(ctx, ports.RunSpec{
+			WorkspacePath: in.Workspace.Path, Prompt: in.Prompt, AgentConfig: in.AgentConfig,
+		})
 		return runErr
 	})
 	rec.End(ctx, telemetry.Result{Usage: res.Usage, CostUSD: res.CostUSD, Model: res.Model}, err)
@@ -170,10 +178,15 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 }
 
 // CheckoutInput identifies the pinned checkout an artifact job needs.
+// JobID, not a path: the git adapter never builds the workspace path
+// (ADR-0006 D7) — CheckoutWorkspace does, the same way Prepare does for
+// JobWorkflow, so both job shapes place workspaces under WorkspaceRoot
+// identically. JobID is validated against the safe path-segment regex by
+// the workflow's validate() before this activity ever runs.
 type CheckoutInput struct {
 	Repo      string
 	SourceRef string
-	Path      string
+	JobID     string
 }
 
 // CheckoutWorkspace delegates to the Checkout port: a pinned, detached git
@@ -181,10 +194,11 @@ type CheckoutInput struct {
 // D5, D6). It is its own activity, distinct from ApplyOverlay and the agent
 // run, so a checkout retry never re-runs — and re-bills — either.
 func (a *Activities) CheckoutWorkspace(ctx context.Context, in CheckoutInput) (Workspace, error) {
-	if err := a.Checkout.Checkout(ctx, in.Repo, in.SourceRef, in.Path); err != nil {
+	path := filepath.Join(a.workspaceRoot(), "tollgate-artifact-"+in.JobID)
+	if err := a.Checkout.Checkout(ctx, in.Repo, in.SourceRef, path); err != nil {
 		return Workspace{}, err
 	}
-	return Workspace{Path: in.Path}, nil
+	return Workspace{Path: path}, nil
 }
 
 // OverlayInput carries what ApplyOverlay needs to place prepared files onto

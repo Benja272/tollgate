@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -167,25 +168,28 @@ func (f *fakeCheckout) Checkout(ctx context.Context, repo, sha, path string) err
 }
 
 func TestActivities_CheckoutWorkspace_DelegatesToPort(t *testing.T) {
+	root := t.TempDir()
 	fc := &fakeCheckout{}
-	acts := &Activities{Checkout: fc}
+	acts := &Activities{Checkout: fc, WorkspaceRoot: root}
 
 	got, err := acts.CheckoutWorkspace(context.Background(), CheckoutInput{
-		Repo: "/abs/repo", SourceRef: "abc123", Path: "/tmp/ws-1",
+		Repo: "/abs/repo", SourceRef: "abc123", JobID: "piece-1",
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, Workspace{Path: "/tmp/ws-1"}, got)
+	wantPath := filepath.Join(root, "tollgate-artifact-piece-1")
+	require.Equal(t, Workspace{Path: wantPath}, got)
 	require.Equal(t, "/abs/repo", fc.gotRepo)
 	require.Equal(t, "abc123", fc.gotSHA)
-	require.Equal(t, "/tmp/ws-1", fc.gotPath)
+	require.Equal(t, wantPath, fc.gotPath,
+		"CheckoutWorkspace builds the path (ADR-0006 D7); the git adapter never does")
 }
 
 func TestActivities_CheckoutWorkspace_PropagatesPortError(t *testing.T) {
 	fc := &fakeCheckout{err: ports.ErrRefNotFound}
-	acts := &Activities{Checkout: fc}
+	acts := &Activities{Checkout: fc, WorkspaceRoot: t.TempDir()}
 
-	_, err := acts.CheckoutWorkspace(context.Background(), CheckoutInput{Repo: "/abs/repo", SourceRef: "x", Path: "/tmp/ws-2"})
+	_, err := acts.CheckoutWorkspace(context.Background(), CheckoutInput{Repo: "/abs/repo", SourceRef: "x", JobID: "piece-2"})
 
 	require.ErrorIs(t, err, ports.ErrRefNotFound)
 }
@@ -228,6 +232,35 @@ func TestWithHeartbeat_StopsCleanlyOnCompletion(t *testing.T) {
 	final := beats.Load()
 	time.Sleep(80 * time.Millisecond)
 	require.Equal(t, final, beats.Load(), "heartbeating must stop once work completes")
+}
+
+// capturingRunner records the RunSpec it was called with, so tests can
+// assert what actually crossed the port boundary.
+type capturingRunner struct {
+	got  ports.RunSpec
+	next ports.RunResult
+}
+
+func (r *capturingRunner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, error) {
+	r.got = spec
+	return r.next, nil
+}
+
+// TestActivities_RunAgent_PassesAgentConfigToPort closes a wiring gap: an
+// ArtifactJobInput's AgentConfig (Task 10) must actually reach the adapter
+// through ports.RunSpec, or the whole D1-D4 config plumbing added in Tasks
+// 2-4 would be unreachable dead code for real artifact jobs.
+func TestActivities_RunAgent_PassesAgentConfigToPort(t *testing.T) {
+	runner := &capturingRunner{next: ports.RunResult{CostUSD: 0.1}}
+	acts := &Activities{Agent: runner, HeartbeatInterval: time.Hour}
+	cfg := json.RawMessage(`{"model":"sonnet"}`)
+
+	_, err := acts.RunAgent(context.Background(), RunAgentInput{
+		Workspace: Workspace{Path: t.TempDir()}, Prompt: "p", AgentConfig: cfg,
+	})
+
+	require.NoError(t, err)
+	require.JSONEq(t, string(cfg), string(runner.got.AgentConfig))
 }
 
 func TestActivities_Prepare_CreatesIsolatedWorkspacePerJob(t *testing.T) {
