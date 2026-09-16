@@ -13,6 +13,12 @@ type CostEntry struct {
 	Usage   TokenUsage
 	USD     float64
 	Attempt int32
+	// PieceID ties a job's spend to the downstream content piece it served,
+	// when the caller supplies one (ArtifactJobWorkflow). It is nullable and
+	// deliberately outside the natural key (job, phase, actor, attempt): two
+	// jobs can share a piece_id, and it must never affect idempotency
+	// (ADR-0006 D13).
+	PieceID string
 }
 
 // LedgerStore persists cost entries. Implementations must be idempotent on

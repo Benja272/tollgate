@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,11 +122,34 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	}()
 
 	res, err := a.Agent.Run(ctx, ports.RunSpec{WorkspacePath: in.Workspace.Path, Prompt: in.Prompt})
-	rec.End(ctx, telemetry.Result{Usage: res.Usage, CostUSD: res.CostUSD}, err)
+	rec.End(ctx, telemetry.Result{Usage: res.Usage, CostUSD: res.CostUSD, Model: res.Model}, err)
 	if err != nil {
+		// A *ports.RunError means the harness produced a parseable result
+		// envelope before failing: the run was billed. Map it to a
+		// non-retryable AgentRunBilled error carrying the partial result, so
+		// runAgentAndRecord (workflow.go) can record the row before the job
+		// fails (ADR-0006 D14). Any other error is a crash or a kill — no
+		// envelope, nothing billed — and stays a plain, retryable error.
+		var runErr *ports.RunError
+		if errors.As(err, &runErr) {
+			details := AgentResult{
+				CostUSD: runErr.Result.CostUSD,
+				Usage:   runErr.Result.Usage,
+				Output:  runErr.Result.Output,
+				Model:   runErr.Result.Model,
+			}
+			return AgentResult{}, temporal.NewNonRetryableApplicationError(
+				runErr.Error(), errTypeAgentRunBilled, nil, details)
+		}
 		return AgentResult{}, err
 	}
-	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output}, nil
+	if res.Model == ports.ModelUnknown {
+		// An empty label would break "every row records the model"
+		// (ADR-0006 D4); the run itself never fails over this.
+		activity.GetLogger(ctx).Warn("agent run resolved to an unknown model",
+			"job_id", in.JobID, "attempt", in.Attempt)
+	}
+	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model}, nil
 }
 
 // LoadRubric reads and content-addresses the rubric file. It is an

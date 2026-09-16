@@ -191,6 +191,38 @@ func TestInstruments_FailedCallMarksSpanErrorAndRecordsNoCost(t *testing.T) {
 	require.Zero(t, cost, "a failed call has no reported cost to bill")
 }
 
+func TestRecording_End_SetsGenAIResponseModelWhenPresent(t *testing.T) {
+	h := newHarness(t)
+
+	// The run_agent call site never sets Call.Model up front (the harness
+	// picks the model); it only becomes known once the run reports back —
+	// exactly like the coding-agent run this exercises (ADR-0006 D4).
+	_, rec := h.inst.StartInvokeAgent(context.Background(), telemetry.Call{
+		JobID: "job-9", Phase: "run_agent", Actor: "agent", AgentName: "coding-agent",
+	})
+	rec.End(context.Background(), telemetry.Result{CostUSD: 0.5, Model: "claude-3-5-sonnet"}, nil)
+
+	ended := h.spans.Ended()
+	require.Len(t, ended, 1)
+	got := attrs(t, ended[0])
+	require.Equal(t, "claude-3-5-sonnet", got["gen_ai.response.model"].AsString())
+}
+
+func TestRecording_End_OmitsResponseModelWhenEmpty(t *testing.T) {
+	h := newHarness(t)
+
+	_, rec := h.inst.StartInvokeAgent(context.Background(), telemetry.Call{
+		JobID: "job-9", Phase: "run_agent", Actor: "agent", AgentName: "coding-agent",
+	})
+	rec.End(context.Background(), telemetry.Result{CostUSD: 0.5}, nil)
+
+	ended := h.spans.Ended()
+	require.Len(t, ended, 1)
+	got := attrs(t, ended[0])
+	_, ok := got["gen_ai.response.model"]
+	require.False(t, ok, "an empty resolved model must never be reported as a span attribute")
+}
+
 func TestInstruments_RecordJudgeScores(t *testing.T) {
 	h := newHarness(t)
 

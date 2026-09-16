@@ -103,6 +103,11 @@ type Call struct {
 type Result struct {
 	Usage   ports.TokenUsage
 	CostUSD float64
+	// Model is the resolved model id (gen_ai.response.model), set when the
+	// call site only learns which model ran after the call completes — the
+	// coding-agent run, whose harness picks the model (ADR-0006 D4). Empty
+	// omits the attribute entirely rather than reporting an empty string.
+	Model string
 }
 
 // Instruments holds the tracer and the instruments every paid call records to.
@@ -220,6 +225,9 @@ func (r *Recording) End(ctx context.Context, res Result, err error) {
 		semconv.GenAIUsageCacheCreationInputTokens(int(res.Usage.CacheCreationTokens)),
 		AttrCostUSD.Float64(res.CostUSD),
 	)
+	if res.Model != "" {
+		r.span.SetAttributes(semconv.GenAIResponseModel(res.Model))
+	}
 	r.inst.record(ctx, r.call, res)
 }
 

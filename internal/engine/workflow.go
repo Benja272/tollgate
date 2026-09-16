@@ -131,7 +131,7 @@ func runAgentAndRecord(agentCtx, ctx workflow.Context, run RunAgentInput, actor,
 	var agent AgentResult
 	err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, run).Get(agentCtx, &agent)
 	if err == nil {
-		if recErr := recordAgentCost(ctx, run, actor, agent); recErr != nil {
+		if recErr := recordAgentCost(ctx, run, actor, pieceID, agent); recErr != nil {
 			return AgentResult{}, recErr
 		}
 		return agent, nil
@@ -141,7 +141,7 @@ func runAgentAndRecord(agentCtx, ctx workflow.Context, run RunAgentInput, actor,
 	if errors.As(err, &appErr) && appErr.Type() == errTypeAgentRunBilled {
 		var billed AgentResult
 		if detailsErr := appErr.Details(&billed); detailsErr == nil {
-			if recErr := recordAgentCost(ctx, run, actor, billed); recErr != nil {
+			if recErr := recordAgentCost(ctx, run, actor, pieceID, billed); recErr != nil {
 				return AgentResult{}, recErr
 			}
 		}
@@ -149,13 +149,13 @@ func runAgentAndRecord(agentCtx, ctx workflow.Context, run RunAgentInput, actor,
 	return AgentResult{}, err
 }
 
-// recordAgentCost journals one run_agent cost row. pieceID is threaded
-// through the call signature for ArtifactJobWorkflow (Task 10); ports.CostEntry
-// gains the field to carry it in a later work unit.
-func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor string, agent AgentResult) error {
+// recordAgentCost journals one run_agent cost row. pieceID is empty for
+// JobWorkflow and set for ArtifactJobWorkflow (Task 10); ports.CostEntry
+// stores it outside the natural key (ADR-0006 D13).
+func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor, pieceID string, agent AgentResult) error {
 	var acts *Activities
 	return workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-		JobID: run.JobID, Phase: "run_agent", Actor: actor,
+		JobID: run.JobID, Phase: "run_agent", Actor: actor, PieceID: pieceID,
 		Model: agent.Model, Usage: agent.Usage, USD: agent.CostUSD, Attempt: run.Attempt,
 	}}).Get(ctx, nil)
 }
