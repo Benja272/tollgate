@@ -108,6 +108,11 @@ type AgentResult struct {
 	Usage   ports.TokenUsage
 	Output  string
 	Model   string
+	// PaidByRunID is the Temporal run id of the execution whose activity
+	// made the paid call. The cost row is keyed by it, not by the run that
+	// writes the row: after a workflow reset the new run re-issues
+	// RecordCosts for a call an earlier run paid for (ADR-0006 §9).
+	PaidByRunID string
 }
 
 // errTypeAgentRunBilled is the temporal.ApplicationError.Type() RunAgent
@@ -182,15 +187,21 @@ func billedUnrecorded(why string, agentErr error) error {
 func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor, pieceID string, agent AgentResult) error {
 	var acts *Activities
 	return workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-		JobID: run.JobID, RunID: runID(ctx), Phase: "run_agent", Actor: actor, PieceID: pieceID,
+		JobID: run.JobID, RunID: paidByRun(ctx, agent.PaidByRunID), Phase: "run_agent", Actor: actor, PieceID: pieceID,
 		Model: agent.Model, Usage: agent.Usage, USD: agent.CostUSD, Attempt: run.Attempt,
 	}}).Get(ctx, nil)
 }
 
-// runID is the current execution's Temporal run id, recorded on every cost
-// row so each execution of a job keeps its own spend (ADR-0006 §9). It comes
-// from the workflow info, so replay reproduces it.
-func runID(ctx workflow.Context) string {
+// paidByRun is the run id a cost row is keyed by: the run whose activity
+// paid, as the activity reported it. Results journaled before activities
+// reported it carry an empty value; those fall back to the current run,
+// which is the run that paid unless the workflow was reset in between
+// (ADR-0006 §9). Both values come from the journal, so replay reproduces
+// them.
+func paidByRun(ctx workflow.Context, reported string) string {
+	if reported != "" {
+		return reported
+	}
 	return workflow.GetInfo(ctx).WorkflowExecution.RunID
 }
 
@@ -285,7 +296,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 			verdicts[i] = judgment.Verdict
 			totalCost += judgment.CostUSD
 			judgeEntries[i] = ports.CostEntry{
-				JobID: in.JobID, RunID: runID(ctx), Phase: "judge", Actor: "judge:" + models[i],
+				JobID: in.JobID, RunID: paidByRun(ctx, judgment.PaidByRunID), Phase: "judge", Actor: "judge:" + models[i],
 				Model: models[i], Usage: judgment.Usage, USD: judgment.CostUSD, Attempt: attempt,
 			}
 		}

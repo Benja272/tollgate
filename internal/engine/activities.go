@@ -226,7 +226,7 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	case billedErr != nil:
 		// Output stays out of the details: it can be large, and failure
 		// payloads are bounded by Temporal's size limit.
-		details := AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Model: res.Model}
+		details := AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Model: res.Model, PaidByRunID: activityRunID(ctx)}
 		return AgentResult{}, temporal.NewNonRetryableApplicationError(
 			billedErr.Error(), errTypeAgentRunBilled, nil, details)
 	case errors.As(err, &unmeteredErr):
@@ -245,7 +245,10 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 		activityLogger(ctx).Warn("agent run resolved to an unknown model",
 			"job_id", in.JobID, "attempt", in.Attempt)
 	}
-	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model}, nil
+	return AgentResult{
+		CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model,
+		PaidByRunID: activityRunID(ctx),
+	}, nil
 }
 
 // agentRunContext bounds the agent run to end runDeadlineMargin before the
@@ -387,6 +390,7 @@ func (a *Activities) JudgeOne(ctx context.Context, in JudgeInput) (ports.Judgmen
 	if err != nil {
 		return ports.Judgment{}, err
 	}
+	judgment.PaidByRunID = activityRunID(ctx)
 	return judgment, nil
 }
 
@@ -413,6 +417,15 @@ func (a *Activities) RecordCosts(ctx context.Context, entries []ports.CostEntry)
 // (ADR-0001 consequence), so it currently ships nothing and reports no URL.
 func (a *Activities) Ship(ctx context.Context, ws Workspace) (ShipResult, error) {
 	return ShipResult{}, nil
+}
+
+// activityRunID is the run id of the workflow execution that scheduled this
+// activity, or empty outside an activity (direct calls in tests).
+func activityRunID(ctx context.Context) string {
+	if !activity.IsActivity(ctx) {
+		return ""
+	}
+	return activity.GetInfo(ctx).WorkflowExecution.RunID
 }
 
 // activityLogger is the activity's logger, or the process default when

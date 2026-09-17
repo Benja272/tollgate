@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,11 @@ func NewLedger(pool *pgxpool.Pool) *Ledger {
 
 var _ ports.LedgerStore = (*Ledger)(nil)
 
+// ErrMissingRunID rejects a new row without a run id: it would collide
+// with every other execution of its job and silently drop their spend.
+// Only rows written before run_id existed carry ”.
+var ErrMissingRunID = errors.New("ledger: cost entry has no run id")
+
 // RecordCosts writes a batch atomically. ON CONFLICT DO NOTHING over the
 // natural key (job, run, phase, actor, attempt) makes retries within one
 // execution idempotent — an at-least-once redelivery never double-counts
@@ -34,6 +40,9 @@ func (l *Ledger) RecordCosts(ctx context.Context, entries []ports.CostEntry) err
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, e := range entries {
+		if e.RunID == "" {
+			return fmt.Errorf("%w: %s/%s/%s", ErrMissingRunID, e.JobID, e.Phase, e.Actor)
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO cost_entries
 			   (job_id, run_id, phase, actor, model, input_tokens, output_tokens,

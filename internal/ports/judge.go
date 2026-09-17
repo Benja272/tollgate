@@ -20,6 +20,10 @@ type Judgment struct {
 	Verdict gate.Verdict
 	CostUSD float64
 	Usage   TokenUsage
+	// PaidByRunID is the Temporal run id of the execution whose activity
+	// made the paid call. The engine sets it, never an adapter; the cost row
+	// is keyed by it.
+	PaidByRunID string
 }
 
 // Judge scores one attempt against a rubric, independently of any other

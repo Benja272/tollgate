@@ -120,13 +120,13 @@ func TestLedger_PerPieceSpend_SumsAcrossJobsIncludingFailed(t *testing.T) {
 	// job3 simulates a job that failed after the agent ran: only its
 	// run_agent row exists, no judge rows — spend must still include it.
 	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
-		{JobID: piece + "-job1", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 1.0, Attempt: 1, PieceID: piece},
+		{JobID: piece + "-job1", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 1.0, Attempt: 1, PieceID: piece},
 	}))
 	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
-		{JobID: piece + "-job2", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 2.0, Attempt: 1, PieceID: piece},
+		{JobID: piece + "-job2", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 2.0, Attempt: 1, PieceID: piece},
 	}))
 	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
-		{JobID: piece + "-job3", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.5, Attempt: 1, PieceID: piece},
+		{JobID: piece + "-job3", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.5, Attempt: 1, PieceID: piece},
 	}))
 
 	spend, err := l.PerPieceSpend(context.Background(), piece)
@@ -179,4 +179,22 @@ func TestLedger_SameJobIDTwoExecutions_BothRowsKept(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, spend, 1)
 	require.InDelta(t, 1.30, spend[0].USD, 1e-9, "per-piece spend must be the sum of both executions")
+}
+
+// A new row without a run id would silently collapse executions again;
+// only rows written before run_id existed may carry ”.
+func TestLedger_RecordCosts_EmptyRunID_Rejected(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-norun-%d", time.Now().UnixNano())
+
+	err := l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "m", USD: 0.1, Attempt: 1},
+	})
+
+	require.ErrorIs(t, err, ErrMissingRunID)
+	var rows int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
+	require.Zero(t, rows)
 }

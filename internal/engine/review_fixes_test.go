@@ -728,3 +728,116 @@ func TestWorkflows_CostRowsCarryRunID(t *testing.T) {
 		}
 	})
 }
+
+// --- R1: the row is keyed by the run that PAID -------------------------------
+
+func TestRunAgent_ResultAndBilledDetailsCarryThePayingRunID(t *testing.T) {
+	for name, runner := range map[string]*validatingRunner{
+		"success": {model: "m"},
+		"billed failure": {run: func(context.Context) (ports.RunResult, error) {
+			return ports.RunResult{}, &ports.RunError{Result: ports.RunResult{CostUSD: 0.3}, Err: errors.New("is_error")}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestActivityEnvironment()
+			acts := &Activities{Agent: runner, HeartbeatInterval: time.Hour}
+			env.RegisterActivity(acts.RunAgent)
+
+			val, err := env.ExecuteActivity(acts.RunAgent, RunAgentInput{JobID: "j", Attempt: 1})
+
+			var got AgentResult
+			if err == nil {
+				require.NoError(t, val.Get(&got))
+			} else {
+				var appErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &appErr)
+				require.NoError(t, appErr.Details(&got))
+			}
+			require.NotEmpty(t, got.PaidByRunID, "the activity must report the run that paid")
+		})
+	}
+}
+
+func TestRecordCosts_UsesThePayingRunID_FallsBackToTheWritingRun(t *testing.T) {
+	cases := map[string]struct{ paid, want string }{
+		"paid by an earlier run": {"run-that-paid", "run-that-paid"},
+		"legacy result":          {"", testRunID},
+	}
+	for name, tc := range cases {
+		t.Run(name+"/success", func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestWorkflowEnvironment()
+			var acts *Activities
+			env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).
+				Return(AgentResult{CostUSD: 1, Model: "m", PaidByRunID: tc.paid}, nil)
+			var recorded []ports.CostEntry
+			env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) { recorded = append(recorded, args.Get(1).([]ports.CostEntry)...) }).
+				Return(nil)
+
+			env.ExecuteWorkflow(runAgentAndRecordTestWorkflow, RunAgentInput{JobID: "j", Attempt: 1})
+
+			require.NoError(t, env.GetWorkflowError())
+			require.Len(t, recorded, 1)
+			require.Equal(t, tc.want, recorded[0].RunID)
+		})
+		t.Run(name+"/billed failure", func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestWorkflowEnvironment()
+			var acts *Activities
+			boom := temporal.NewNonRetryableApplicationError("billed", errTypeAgentRunBilled, nil,
+				AgentResult{CostUSD: 1, PaidByRunID: tc.paid})
+			env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{}, boom)
+			var recorded []ports.CostEntry
+			env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) { recorded = append(recorded, args.Get(1).([]ports.CostEntry)...) }).
+				Return(nil)
+
+			env.ExecuteWorkflow(runAgentAndRecordTestWorkflow, RunAgentInput{JobID: "j", Attempt: 1})
+
+			require.Error(t, env.GetWorkflowError())
+			require.Len(t, recorded, 1)
+			require.Equal(t, tc.want, recorded[0].RunID)
+		})
+		t.Run(name+"/judge", func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestWorkflowEnvironment()
+			var acts *Activities
+			env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/j"}, nil)
+			env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(passRubric(), nil)
+			env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 1, Model: "m", PaidByRunID: tc.paid}, nil)
+			judgment := passJudgment()
+			judgment.PaidByRunID = tc.paid
+			env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(judgment, nil)
+			env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(passDecision(), nil)
+			env.OnActivity(acts.Ship, mock.Anything, mock.Anything).Return(ShipResult{}, nil)
+			var recorded []ports.CostEntry
+			env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) { recorded = append(recorded, args.Get(1).([]ports.CostEntry)...) }).
+				Return(nil)
+
+			env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "j", Prompt: "p", JudgeModels: []string{"haiku"}})
+
+			require.NoError(t, env.GetWorkflowError())
+			require.Len(t, recorded, 2)
+			for _, e := range recorded {
+				require.Equal(t, tc.want, e.RunID, "%s row", e.Phase)
+			}
+		})
+	}
+}
+
+func TestJudgeOne_JudgmentCarriesThePayingRunID(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+	acts := &Activities{Judges: map[string]ports.Judge{"haiku": passingJudge{cost: 0.1}}}
+	env.RegisterActivity(acts.JudgeOne)
+
+	val, err := env.ExecuteActivity(acts.JudgeOne, JudgeInput{JobID: "j", Model: "haiku", Rubric: passRubric()})
+	require.NoError(t, err)
+
+	var got ports.Judgment
+	require.NoError(t, val.Get(&got))
+	require.NotEmpty(t, got.PaidByRunID)
+}
