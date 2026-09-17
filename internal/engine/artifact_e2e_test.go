@@ -12,12 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/Benja272/tollgate/internal/adapters/claudecode"
 	"github.com/Benja272/tollgate/internal/adapters/gitcli"
+	"github.com/Benja272/tollgate/internal/adapters/postgres"
 	"github.com/Benja272/tollgate/internal/ports"
 	"github.com/Benja272/tollgate/internal/workspace"
 )
@@ -238,4 +240,102 @@ func TestArtifactJobWorkflow_E2E_BilledFailure_RowStillLands(t *testing.T) {
 	require.Equal(t, "claude-3-5-haiku", entries[0].Model)
 	require.Equal(t, "piece-e2e-2", entries[0].PieceID)
 	require.InDelta(t, 0.07, entries[0].USD, 1e-9)
+}
+
+// ledgerPoolOrSkip connects to the test database the postgres adapter tests
+// use, honoring TOLLGATE_REQUIRE_POSTGRES.
+func ledgerPoolOrSkip(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("TOLLGATE_TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://tollgate:tollgate@localhost:5432/tollgate?sslmode=disable"
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	if err := pool.Ping(context.Background()); err != nil {
+		pool.Close()
+		if os.Getenv("TOLLGATE_REQUIRE_POSTGRES") != "" {
+			t.Fatalf("TOLLGATE_REQUIRE_POSTGRES is set but postgres is unreachable: %v", err)
+		}
+		t.Skipf("postgres not reachable, skipping integration test: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// TestArtifactJobWorkflow_E2E_SameJobIDTwice_BothExecutionsLedgered is the
+// review-B8 scenario end to end: a real Temporal server and a real Postgres
+// ledger, the same JobID executed twice (a model comparison re-run), each
+// execution billing a different amount. Both rows must land and the
+// per-piece total must be their sum.
+func TestArtifactJobWorkflow_E2E_SameJobIDTwice_BothExecutionsLedgered(t *testing.T) {
+	c := dialOrSkip(t)
+	defer c.Close()
+	ledger := postgres.NewLedger(ledgerPoolOrSkip(t))
+
+	repo, sha := e2eGitRepo(t)
+	workspaceRoot := t.TempDir()
+	overlaySrc := filepath.Join(t.TempDir(), "plan.md")
+	require.NoError(t, os.WriteFile(overlaySrc, []byte("the plan"), 0o644))
+
+	// The fake agent bills 0.50 on its first run and 0.80 on its second.
+	state := filepath.Join(t.TempDir(), "runs")
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	script := `#!/bin/sh
+if [ -f "` + state + `" ]; then cost=0.80; else cost=0.50; touch "` + state + `"; fi
+printf '{"type":"result","is_error":false,"total_cost_usd":%s,"result":"ok","modelUsage":{"claude-haiku-4-5":{"costUSD":%s}}}\n' "$cost" "$cost"
+`
+	require.NoError(t, os.WriteFile(claudeBin, []byte(script), 0o755))
+
+	acts := &Activities{
+		Agent:             &claudecode.Runner{Bin: claudeBin},
+		Checkout:          gitcli.Checkout{},
+		Ledger:            ledger,
+		WorkspaceRoot:     workspaceRoot,
+		HeartbeatInterval: time.Hour,
+	}
+	taskQueue := fmt.Sprintf("tollgate-artifact-e2e-rerun-%d", time.Now().UnixNano())
+	w := e2eWorker(t, c, taskQueue, acts)
+	defer w.Stop()
+
+	stamp := time.Now().UnixNano()
+	jobID := fmt.Sprintf("e2e-rerun-%d", stamp)
+	piece := fmt.Sprintf("piece-e2e-rerun-%d", stamp)
+	in := ArtifactJobInput{
+		JobID:            jobID,
+		PieceID:          piece,
+		Repo:             repo,
+		SourceRef:        sha,
+		Prompt:           "render the piece",
+		AgentConfig:      json.RawMessage(`{"model":"haiku"}`),
+		DestinationRoots: []string{"output"},
+		Overlays:         []workspace.Overlay{{Source: overlaySrc, Dest: "output/plan.md"}},
+	}
+	workflowID := "artifact-" + jobID
+	t.Cleanup(func() {
+		_ = c.TerminateWorkflow(context.Background(), workflowID, "", "test cleanup")
+	})
+
+	runIDs := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: workflowID, TaskQueue: taskQueue}, ArtifactJobWorkflow, in)
+		require.NoError(t, err)
+		require.NoError(t, run.Get(ctx, nil), "execution %d did not complete", i+1)
+		cancel()
+		runIDs[run.GetRunID()] = true
+
+		// The overlay left untracked files, so the checkout is not reusable;
+		// an operator removes the worktree before re-running (ADR-0006).
+		out, err := exec.Command("git", "-C", repo, "worktree", "remove", "--force",
+			filepath.Join(workspaceRoot, "tollgate-artifact-"+jobID)).CombinedOutput()
+		require.NoError(t, err, "git worktree remove: %s", out)
+	}
+	require.Len(t, runIDs, 2, "two distinct executions")
+
+	spend, err := ledger.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, err)
+	require.Len(t, spend, 1)
+	require.Equal(t, "claude-haiku-4-5", spend[0].Model)
+	require.InDelta(t, 1.30, spend[0].USD, 1e-9, "both executions' spend must be in the ledger")
 }

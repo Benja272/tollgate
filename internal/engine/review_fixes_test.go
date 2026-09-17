@@ -471,7 +471,6 @@ func mockArtifactActivities(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity(acts.CheckoutWorkspace, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/a"}, nil)
 	env.OnActivity(acts.ApplyOverlay, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 1, Model: "m"}, nil)
-	env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).Return(nil)
 }
 
 func TestArtifactJobWorkflow_AgentTimeout_DefaultAndOverride(t *testing.T) {
@@ -488,6 +487,8 @@ func TestArtifactJobWorkflow_AgentTimeout_DefaultAndOverride(t *testing.T) {
 			env := ts.NewTestWorkflowEnvironment()
 			starts := watchActivities(env)
 			mockArtifactActivities(env)
+			var acts *Activities
+			env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).Return(nil)
 			in := validArtifactInput()
 			in.AgentTimeoutMinutes = tc.minutes
 
@@ -624,4 +625,48 @@ func TestWorkflows_RetryCaps(t *testing.T) {
 			require.Equal(t, tc.want, starts.count(tc.activity))
 		})
 	}
+}
+
+// Every cost row carries the Temporal run id, so two executions of the same
+// JobID keep separate rows (ADR-0006 §9).
+func TestWorkflows_CostRowsCarryRunID(t *testing.T) {
+	t.Run("ArtifactJobWorkflow", func(t *testing.T) {
+		var ts testsuite.WorkflowTestSuite
+		env := ts.NewTestWorkflowEnvironment()
+		mockArtifactActivities(env)
+		var recorded []ports.CostEntry
+		var acts *Activities
+		env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) { recorded = append(recorded, args.Get(1).([]ports.CostEntry)...) }).
+			Return(nil)
+
+		env.ExecuteWorkflow(ArtifactJobWorkflow, validArtifactInput())
+
+		require.NoError(t, env.GetWorkflowError())
+		require.Len(t, recorded, 1)
+		require.Equal(t, testRunID, recorded[0].RunID)
+	})
+	t.Run("JobWorkflow", func(t *testing.T) {
+		var ts testsuite.WorkflowTestSuite
+		env := ts.NewTestWorkflowEnvironment()
+		var acts *Activities
+		env.OnActivity(acts.Prepare, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/j"}, nil)
+		env.OnActivity(acts.LoadRubric, mock.Anything, mock.Anything).Return(passRubric(), nil)
+		env.OnActivity(acts.RunAgent, mock.Anything, mock.Anything).Return(AgentResult{CostUSD: 1, Model: "m"}, nil)
+		env.OnActivity(acts.JudgeOne, mock.Anything, mock.Anything).Return(passJudgment(), nil)
+		env.OnActivity(acts.DecideGate, mock.Anything, mock.Anything).Return(passDecision(), nil)
+		env.OnActivity(acts.Ship, mock.Anything, mock.Anything).Return(ShipResult{}, nil)
+		var recorded []ports.CostEntry
+		env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).
+			Run(func(args mock.Arguments) { recorded = append(recorded, args.Get(1).([]ports.CostEntry)...) }).
+			Return(nil)
+
+		env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-r", Prompt: "p", JudgeModels: []string{"haiku"}})
+
+		require.NoError(t, env.GetWorkflowError())
+		require.Len(t, recorded, 2, "one run_agent row and one judge row")
+		for _, e := range recorded {
+			require.Equal(t, testRunID, e.RunID, "%s row", e.Phase)
+		}
+	})
 }

@@ -182,9 +182,16 @@ func billedUnrecorded(why string, agentErr error) error {
 func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor, pieceID string, agent AgentResult) error {
 	var acts *Activities
 	return workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-		JobID: run.JobID, Phase: "run_agent", Actor: actor, PieceID: pieceID,
+		JobID: run.JobID, RunID: runID(ctx), Phase: "run_agent", Actor: actor, PieceID: pieceID,
 		Model: agent.Model, Usage: agent.Usage, USD: agent.CostUSD, Attempt: run.Attempt,
 	}}).Get(ctx, nil)
+}
+
+// runID is the current execution's Temporal run id, recorded on every cost
+// row so each execution of a job keeps its own spend (ADR-0006 §9). It comes
+// from the workflow info, so replay reproduces it.
+func runID(ctx workflow.Context) string {
+	return workflow.GetInfo(ctx).WorkflowExecution.RunID
 }
 
 // ShipResult reports the PR created for a passing job.
@@ -278,7 +285,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 			verdicts[i] = judgment.Verdict
 			totalCost += judgment.CostUSD
 			judgeEntries[i] = ports.CostEntry{
-				JobID: in.JobID, Phase: "judge", Actor: "judge:" + models[i],
+				JobID: in.JobID, RunID: runID(ctx), Phase: "judge", Actor: "judge:" + models[i],
 				Model: models[i], Usage: judgment.Usage, USD: judgment.CostUSD, Attempt: attempt,
 			}
 		}

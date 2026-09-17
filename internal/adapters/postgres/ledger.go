@@ -23,8 +23,9 @@ func NewLedger(pool *pgxpool.Pool) *Ledger {
 var _ ports.LedgerStore = (*Ledger)(nil)
 
 // RecordCosts writes a batch atomically. ON CONFLICT DO NOTHING over the
-// natural key (job, phase, actor, attempt) makes retries idempotent — an
-// at-least-once redelivery never double-counts money.
+// natural key (job, run, phase, actor, attempt) makes retries within one
+// execution idempotent — an at-least-once redelivery never double-counts
+// money — while a second execution of the same job keeps its own rows.
 func (l *Ledger) RecordCosts(ctx context.Context, entries []ports.CostEntry) error {
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
@@ -35,11 +36,11 @@ func (l *Ledger) RecordCosts(ctx context.Context, entries []ports.CostEntry) err
 	for _, e := range entries {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO cost_entries
-			   (job_id, phase, actor, model, input_tokens, output_tokens,
+			   (job_id, run_id, phase, actor, model, input_tokens, output_tokens,
 			    cache_read_tokens, cache_creation_tokens, usd, attempt, piece_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''))
-			 ON CONFLICT (job_id, phase, actor, attempt) DO NOTHING`,
-			e.JobID, e.Phase, e.Actor, e.Model,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''))
+			 ON CONFLICT (job_id, run_id, phase, actor, attempt) DO NOTHING`,
+			e.JobID, e.RunID, e.Phase, e.Actor, e.Model,
 			e.Usage.InputTokens, e.Usage.OutputTokens,
 			e.Usage.CacheReadTokens, e.Usage.CacheCreationTokens,
 			e.USD, e.Attempt, e.PieceID,
@@ -57,10 +58,10 @@ type PieceSpend struct {
 	USD   float64
 }
 
-// PerPieceSpend sums cost_entries by model for one piece_id (ADR-0006 D13):
-// SUM across every job's recorded rows, whether or not that job's workflow
-// ultimately succeeded — a job that failed after the agent ran still
-// contributes its run_agent row.
+// PerPieceSpend sums cost_entries by model for one piece_id (ADR-0006 §9):
+// SUM across every recorded row of every job and every execution, whether
+// or not that execution ultimately succeeded — a job that failed after the
+// agent ran still contributes its run_agent row.
 func (l *Ledger) PerPieceSpend(ctx context.Context, pieceID string) ([]PieceSpend, error) {
 	rows, err := l.pool.Query(ctx,
 		`SELECT model, COALESCE(SUM(usd), 0) FROM cost_entries

@@ -290,13 +290,13 @@ func TestJobWorkflow_FixLoop(t *testing.T) {
 					wantActor = "agent"
 				}
 				require.Contains(t, entries, ports.CostEntry{
-					JobID: "job-fix", Phase: "run_agent", Actor: wantActor,
+					JobID: "job-fix", RunID: testRunID, Phase: "run_agent", Actor: wantActor,
 					USD: tc.agentCosts[attempt-1], Attempt: int32(attempt),
 				}, "ledger must carry an attempt-numbered run_agent entry for attempt %d", attempt)
 
 				for _, model := range []string{"haiku", "sonnet"} {
 					require.Contains(t, entries, ports.CostEntry{
-						JobID: "job-fix", Phase: "judge", Actor: "judge:" + model,
+						JobID: "job-fix", RunID: testRunID, Phase: "judge", Actor: "judge:" + model,
 						Model: model, USD: 0.1, Attempt: int32(attempt),
 					}, "every re-judging round must be ledgered under its own attempt")
 				}
@@ -521,3 +521,6 @@ func TestJobWorkflow_BilledFailure_RecordsAgentRowAndNeverCallsJudgeOne(t *testi
 	env.AssertNotCalled(t, "JudgeOne", mock.Anything, mock.Anything)
 	env.AssertNotCalled(t, "Ship", mock.Anything, mock.Anything)
 }
+
+// testRunID is the run id the Temporal test environment assigns.
+const testRunID = "default-test-run-id"

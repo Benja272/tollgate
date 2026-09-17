@@ -33,11 +33,11 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 func entriesFor(jobID string) []ports.CostEntry {
 	return []ports.CostEntry{
-		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 10, OutputTokens: 84, CacheReadTokens: 18282, CacheCreationTokens: 23716}},
-		{JobID: jobID, Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 60}},
-		{JobID: jobID, Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 55}},
 	}
 }
@@ -149,4 +149,34 @@ func TestLedger_RecordCosts_IsIdempotent(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
 	require.Equal(t, 3, rows, "a retried write must never double-count money")
+}
+
+// Re-running a piece under the same JobID is a primary use case (model A/B
+// comparison). Each Temporal execution bills separately, so each keeps its
+// row; the natural key used to collapse them and drop the second run's
+// spend (review B8, reproduced).
+func TestLedger_SameJobIDTwoExecutions_BothRowsKept(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	piece := fmt.Sprintf("piece-rerun-%d", time.Now().UnixNano())
+	jobID := piece + "-render"
+	row := func(runID string, usd float64) []ports.CostEntry {
+		return []ports.CostEntry{{JobID: jobID, RunID: runID, Phase: "run_agent", Actor: "agent",
+			Model: "claude-haiku-4-5", USD: usd, Attempt: 1, PieceID: piece}}
+	}
+
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-a", 0.50)))
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-b", 0.80)))
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-b", 0.80)),
+		"a retried write within one execution must stay idempotent")
+
+	var rows int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
+	require.Equal(t, 2, rows, "one row per execution, no duplicate per retry")
+
+	spend, err := l.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, err)
+	require.Len(t, spend, 1)
+	require.InDelta(t, 1.30, spend[0].USD, 1e-9, "per-piece spend must be the sum of both executions")
 }
