@@ -111,7 +111,7 @@ Revert the PR. The migration only adds a nullable column and has a goose down st
 
 ## Success Criteria
 
-- [ ] An artifact job started from the CLI with a full SHA produces artifacts in a worktree at that commit, with no PR. A branch ref is rejected before any paid call.
-- [ ] Phase N's edited tracked files overlay into phase N+1 inside the declared roots. Writes outside the roots fail.
-- [ ] Ledger rows for one piece's three jobs sum by `piece_id` regardless of job outcome, and each shows the model.
-- [ ] The replay test and the existing tests pass unchanged.
+- [x] An artifact job started from the CLI with a full SHA produces artifacts in a worktree at that commit, with no PR. A branch ref is rejected before any paid call.
+- [x] Phase N's edited tracked files overlay into phase N+1 inside the declared roots. Writes outside the roots fail.
+- [x] Ledger rows for one piece's three jobs sum by `piece_id` regardless of job outcome, and each shows the model.
+- [x] The replay test and the existing tests pass unchanged.
