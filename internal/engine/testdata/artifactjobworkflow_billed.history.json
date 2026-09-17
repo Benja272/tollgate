@@ -1,0 +1,715 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-09-17T16:37:11.578675058Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "1086394",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "ArtifactJobWorkflow"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJKb2JJRCI6ImNhcHR1cmUtYmlsbGVkIiwiUGllY2VJRCI6ImNhcHR1cmUtcGllY2UiLCJSZXBvIjoiL3RtcC9UZXN0Q2FwdHVyZUFydGlmYWN0Sm9iV29ya2Zsb3dIaXN0b3JpZXMxMDExMjU1MDkzLzAwNSIsIlNvdXJjZVJlZiI6ImI3MmRhZWU3NmIwN2FiZjIyMmQwMGM3OGUxMWMzNTNjZWI4NDhjZmMiLCJQcm9tcHQiOiJjYXB0dXJlIGZpeHR1cmUiLCJBZ2VudENvbmZpZyI6eyJtb2RlbCI6ImhhaWt1In0sIkRlc3RpbmF0aW9uUm9vdHMiOlsib3V0cHV0Il0sIk92ZXJsYXlzIjpbeyJTb3VyY2UiOiIvdG1wL1Rlc3RDYXB0dXJlQXJ0aWZhY3RKb2JXb3JrZmxvd0hpc3RvcmllczEwMTEyNTUwOTMvMDA2L3BsYW4ubWQiLCJEZXN0Ijoib3V0cHV0L3BsYW4ubWQifV0sIkFnZW50VGltZW91dE1pbnV0ZXMiOjB9"
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "0s",
+        "workflowRunTimeout": "0s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "01a0b03a-b11a-7a4a-b3d7-576dedb752af",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "firstExecutionRunId": "01a0b03a-b11a-7a4a-b3d7-576dedb752af",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "header": {},
+        "workflowId": "tollgate-capture-artifact-billed-1789663031577573707"
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-09-17T16:37:11.578731083Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086395",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-09-17T16:37:11.583089241Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086400",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "c89cdd6b-9077-4f63-80c4-058c673591b2",
+        "historySizeBytes": "818",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-09-17T16:37:11.586324889Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086404",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {
+          "langUsedFlags": [
+            3
+          ],
+          "sdkName": "temporal-go",
+          "sdkVersion": "1.47.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-09-17T16:37:11.586370250Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1086405",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "5",
+        "activityType": {
+          "name": "ValidateAgentConfig"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJtb2RlbCI6ImhhaWt1In0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "4",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-09-17T16:37:11.588072087Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1086411",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "6565af10-0c10-4b38-80f8-b00592a09d74",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-09-17T16:37:11.590834068Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1086412",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "3052317@benja-Legion-7-16IRX9@"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-09-17T16:37:11.590839091Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086413",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "benja-Legion-7-16IRX9:6518183a-35da-41b3-8335-9deafc9f9646",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tollgate-capture-artifact-billed-1789663031577077697"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-09-17T16:37:11.592097172Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086417",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "ff2c6aa5-433c-4c1a-ac51-c60c9aa5dad7",
+        "historySizeBytes": "1630",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-09-17T16:37:11.594679877Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086421",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "startedEventId": "9",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-09-17T16:37:11.594716920Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1086422",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "11",
+        "activityType": {
+          "name": "CheckoutWorkspace"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJSZXBvIjoiL3RtcC9UZXN0Q2FwdHVyZUFydGlmYWN0Sm9iV29ya2Zsb3dIaXN0b3JpZXMxMDExMjU1MDkzLzAwNSIsIlNvdXJjZVJlZiI6ImI3MmRhZWU3NmIwN2FiZjIyMmQwMGM3OGUxMWMzNTNjZWI4NDhjZmMiLCJKb2JJRCI6ImNhcHR1cmUtYmlsbGVkIn0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "600s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "10",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-09-17T16:37:11.595997675Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1086427",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "11",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "e8f7d241-1c2b-4c9e-b19b-c8e82b15ece8",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-09-17T16:37:11.609587923Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1086428",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJQYXRoIjoiL3RtcC9UZXN0Q2FwdHVyZUFydGlmYWN0Sm9iV29ya2Zsb3dIaXN0b3JpZXMxMDExMjU1MDkzLzAwOC90b2xsZ2F0ZS1hcnRpZmFjdC1jYXB0dXJlLWJpbGxlZCJ9"
+            }
+          ]
+        },
+        "scheduledEventId": "11",
+        "startedEventId": "12",
+        "identity": "3052317@benja-Legion-7-16IRX9@"
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-09-17T16:37:11.609599084Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086429",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "benja-Legion-7-16IRX9:6518183a-35da-41b3-8335-9deafc9f9646",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tollgate-capture-artifact-billed-1789663031577077697"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-09-17T16:37:11.611161090Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086433",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "14",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "ee696dc8-9ed0-4429-bd96-7f9b2a4cc43b",
+        "historySizeBytes": "2689",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-09-17T16:37:11.613405513Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086437",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "14",
+        "startedEventId": "15",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-09-17T16:37:11.613443681Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1086438",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "17",
+        "activityType": {
+          "name": "ApplyOverlay"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJXb3Jrc3BhY2UiOnsiUGF0aCI6Ii90bXAvVGVzdENhcHR1cmVBcnRpZmFjdEpvYldvcmtmbG93SGlzdG9yaWVzMTAxMTI1NTA5My8wMDgvdG9sbGdhdGUtYXJ0aWZhY3QtY2FwdHVyZS1iaWxsZWQifSwiRGVzdGluYXRpb25Sb290cyI6WyJvdXRwdXQiXSwiT3ZlcmxheXMiOlt7IlNvdXJjZSI6Ii90bXAvVGVzdENhcHR1cmVBcnRpZmFjdEpvYldvcmtmbG93SGlzdG9yaWVzMTAxMTI1NTA5My8wMDYvcGxhbi5tZCIsIkRlc3QiOiJvdXRwdXQvcGxhbi5tZCJ9XX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "1800s",
+        "heartbeatTimeout": "30s",
+        "workflowTaskCompletedEventId": "16",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "100s",
+          "maximumAttempts": 3
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-09-17T16:37:11.615140990Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1086443",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "17",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "8d261f86-2655-4a54-9528-94e7b746a718",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-09-17T16:37:11.620321914Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1086444",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "17",
+        "startedEventId": "18",
+        "identity": "3052317@benja-Legion-7-16IRX9@"
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-09-17T16:37:11.620326406Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086445",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "benja-Legion-7-16IRX9:6518183a-35da-41b3-8335-9deafc9f9646",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tollgate-capture-artifact-billed-1789663031577077697"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-09-17T16:37:11.621622817Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086449",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "20",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "d2739f2a-1624-4bfd-9937-9d481a8af686",
+        "historySizeBytes": "3723",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-09-17T16:37:11.623656258Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086453",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "20",
+        "startedEventId": "21",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-09-17T16:37:11.623683743Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1086454",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "23",
+        "activityType": {
+          "name": "RunAgent"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJKb2JJRCI6ImNhcHR1cmUtYmlsbGVkIiwiV29ya3NwYWNlIjp7IlBhdGgiOiIvdG1wL1Rlc3RDYXB0dXJlQXJ0aWZhY3RKb2JXb3JrZmxvd0hpc3RvcmllczEwMTEyNTUwOTMvMDA4L3RvbGxnYXRlLWFydGlmYWN0LWNhcHR1cmUtYmlsbGVkIn0sIlByb21wdCI6ImNhcHR1cmUgZml4dHVyZSIsIkF0dGVtcHQiOjEsIkFnZW50Q29uZmlnIjp7Im1vZGVsIjoiaGFpa3UifX0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "3600s",
+        "heartbeatTimeout": "5s",
+        "workflowTaskCompletedEventId": "22",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "100s",
+          "maximumAttempts": 2
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-09-17T16:37:11.624598927Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1086459",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "23",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "4702d287-0fd7-4758-ad7d-edcf03aa3b64",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-09-17T16:37:11.628488467Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+      "taskId": "1086460",
+      "activityTaskFailedEventAttributes": {
+        "failure": {
+          "message": "billed agent run failed: claude code reported error: denied",
+          "source": "GoSDK",
+          "applicationFailureInfo": {
+            "type": "AgentRunBilled",
+            "nonRetryable": true,
+            "details": {
+              "payloads": [
+                {
+                  "metadata": {
+                    "encoding": "anNvbi9wbGFpbg=="
+                  },
+                  "data": "eyJDb3N0VVNEIjowLjA3LCJVc2FnZSI6eyJJbnB1dFRva2VucyI6MCwiT3V0cHV0VG9rZW5zIjowLCJDYWNoZVJlYWRUb2tlbnMiOjAsIkNhY2hlQ3JlYXRpb25Ub2tlbnMiOjB9LCJPdXRwdXQiOiIiLCJNb2RlbCI6ImNsYXVkZS1oYWlrdS00LTUiLCJQYWlkQnlSdW5JRCI6IjAxYTBiMDNhLWIxMWEtN2E0YS1iM2Q3LTU3NmRlZGI3NTJhZiJ9"
+                }
+              ]
+            }
+          }
+        },
+        "scheduledEventId": "23",
+        "startedEventId": "24",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "retryState": "RETRY_STATE_NON_RETRYABLE_FAILURE"
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-09-17T16:37:11.628495381Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086461",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "benja-Legion-7-16IRX9:6518183a-35da-41b3-8335-9deafc9f9646",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tollgate-capture-artifact-billed-1789663031577077697"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "27",
+      "eventTime": "2026-09-17T16:37:11.629386331Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086465",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "26",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "9e0ba172-2109-4e22-8a00-7f479f21b395",
+        "historySizeBytes": "5026",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "28",
+      "eventTime": "2026-09-17T16:37:11.631554722Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086469",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "26",
+        "startedEventId": "27",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "29",
+      "eventTime": "2026-09-17T16:37:11.631586235Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1086470",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "29",
+        "activityType": {
+          "name": "RecordCosts"
+        },
+        "taskQueue": {
+          "name": "tollgate-capture-artifact-billed-1789663031577077697",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "W3siSm9iSUQiOiJjYXB0dXJlLWJpbGxlZCIsIlJ1bklEIjoiMDFhMGIwM2EtYjExYS03YTRhLWIzZDctNTc2ZGVkYjc1MmFmIiwiUGhhc2UiOiJydW5fYWdlbnQiLCJBY3RvciI6ImFnZW50IiwiTW9kZWwiOiJjbGF1ZGUtaGFpa3UtNC01IiwiVXNhZ2UiOnsiSW5wdXRUb2tlbnMiOjAsIk91dHB1dFRva2VucyI6MCwiQ2FjaGVSZWFkVG9rZW5zIjowLCJDYWNoZUNyZWF0aW9uVG9rZW5zIjowfSwiVVNEIjowLjA3LCJBdHRlbXB0IjoxLCJQaWVjZUlEIjoiY2FwdHVyZS1waWVjZSJ9XQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "600s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "28",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "100s"
+        },
+        "useWorkflowBuildId": true
+      }
+    },
+    {
+      "eventId": "30",
+      "eventTime": "2026-09-17T16:37:11.632740818Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1086475",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "29",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "b61b93ec-f975-42d9-bcca-7f626492be3f",
+        "attempt": 1,
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "31",
+      "eventTime": "2026-09-17T16:37:11.634496114Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1086476",
+      "activityTaskCompletedEventAttributes": {
+        "scheduledEventId": "29",
+        "startedEventId": "30",
+        "identity": "3052317@benja-Legion-7-16IRX9@"
+      }
+    },
+    {
+      "eventId": "32",
+      "eventTime": "2026-09-17T16:37:11.634500384Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1086477",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "benja-Legion-7-16IRX9:6518183a-35da-41b3-8335-9deafc9f9646",
+          "kind": "TASK_QUEUE_KIND_STICKY",
+          "normalName": "tollgate-capture-artifact-billed-1789663031577077697"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "33",
+      "eventTime": "2026-09-17T16:37:11.635675547Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1086481",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "32",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "requestId": "65a2ebc3-6481-4349-b0c3-785e78d033dc",
+        "historySizeBytes": "6066",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        }
+      }
+    },
+    {
+      "eventId": "34",
+      "eventTime": "2026-09-17T16:37:11.637915657Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1086485",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "32",
+        "startedEventId": "33",
+        "identity": "3052317@benja-Legion-7-16IRX9@",
+        "workerVersion": {
+          "buildId": "f70bf7e261dd3fa6be1a22ac3a32a78a"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "35",
+      "eventTime": "2026-09-17T16:37:11.637946016Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
+      "taskId": "1086486",
+      "workflowExecutionFailedEventAttributes": {
+        "failure": {
+          "message": "activity error",
+          "source": "GoSDK",
+          "cause": {
+            "message": "billed agent run failed: claude code reported error: denied",
+            "source": "GoSDK",
+            "applicationFailureInfo": {
+              "type": "AgentRunBilled",
+              "nonRetryable": true,
+              "details": {
+                "payloads": [
+                  {
+                    "metadata": {
+                      "encoding": "anNvbi9wbGFpbg=="
+                    },
+                    "data": "eyJDb3N0VVNEIjowLjA3LCJVc2FnZSI6eyJJbnB1dFRva2VucyI6MCwiT3V0cHV0VG9rZW5zIjowLCJDYWNoZVJlYWRUb2tlbnMiOjAsIkNhY2hlQ3JlYXRpb25Ub2tlbnMiOjB9LCJPdXRwdXQiOiIiLCJNb2RlbCI6ImNsYXVkZS1oYWlrdS00LTUiLCJQYWlkQnlSdW5JRCI6IjAxYTBiMDNhLWIxMWEtN2E0YS1iM2Q3LTU3NmRlZGI3NTJhZiJ9"
+                  }
+                ]
+              }
+            }
+          },
+          "activityFailureInfo": {
+            "scheduledEventId": "23",
+            "startedEventId": "24",
+            "identity": "3052317@benja-Legion-7-16IRX9@",
+            "activityType": {
+              "name": "RunAgent"
+            },
+            "activityId": "23",
+            "retryState": "RETRY_STATE_NON_RETRYABLE_FAILURE"
+          }
+        },
+        "retryState": "RETRY_STATE_RETRY_POLICY_NOT_SET",
+        "workflowTaskCompletedEventId": "34"
+      }
+    }
+  ]
+}

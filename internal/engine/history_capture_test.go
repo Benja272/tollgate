@@ -14,8 +14,11 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/Benja272/tollgate/internal/adapters/claudecode"
+	"github.com/Benja272/tollgate/internal/adapters/gitcli"
 	"github.com/Benja272/tollgate/internal/gate"
 	"github.com/Benja272/tollgate/internal/ports"
+	"github.com/Benja272/tollgate/internal/workspace"
 )
 
 // captureRubric is a minimal, fixed rubric used only to produce the two
@@ -149,4 +152,67 @@ func captureOne(t *testing.T, c client.Client, name string, acts interface{}, in
 
 	require.NoError(t, os.WriteFile(outPath, out, 0o644))
 	t.Logf("captured %s history: %s (%d bytes)", name, outPath, len(out))
+}
+
+// TestCaptureArtifactJobWorkflowHistories (re)captures the ArtifactJobWorkflow
+// replay fixtures — success and billed failure — against the workflow code
+// at the end of the post-archive review. It is opt-in
+// (TOLLGATE_CAPTURE_ARTIFACT_HISTORY=1). Recapture only on purpose: the
+// fixtures are the determinism gate for the next workflow change, and a
+// change that breaks them needs workflow.GetVersion, not a new capture.
+func TestCaptureArtifactJobWorkflowHistories(t *testing.T) {
+	if os.Getenv("TOLLGATE_CAPTURE_ARTIFACT_HISTORY") == "" {
+		t.Skip("history capture is opt-in; set TOLLGATE_CAPTURE_ARTIFACT_HISTORY=1 to (re)capture the ArtifactJobWorkflow histories")
+	}
+	if _, err := exec.LookPath("temporal"); err != nil {
+		t.Fatalf("the temporal CLI is required to capture history as JSON: %v", err)
+	}
+	c, err := client.Dial(client.Options{})
+	require.NoError(t, err, "capture requires a reachable Temporal dev server")
+	defer c.Close()
+
+	for _, tc := range []struct {
+		name, envelope string
+		wantErr        bool
+	}{
+		{"success", `{"type":"result","is_error":false,"total_cost_usd":0.42,"result":"ok","modelUsage":{"claude-haiku-4-5":{"costUSD":0.42}}}`, false},
+		{"billed", `{"type":"result","is_error":true,"total_cost_usd":0.07,"result":"denied","modelUsage":{"claude-haiku-4-5":{"costUSD":0.07}}}`, true},
+	} {
+		repo, sha := e2eGitRepo(t)
+		src := filepath.Join(t.TempDir(), "plan.md")
+		require.NoError(t, os.WriteFile(src, []byte("plan"), 0o644))
+		acts := &Activities{
+			Agent:             &claudecode.Runner{Bin: e2eFakeClaude(t, tc.envelope)},
+			Checkout:          gitcli.Checkout{},
+			Ledger:            &e2eFakeLedger{},
+			WorkspaceRoot:     t.TempDir(),
+			HeartbeatInterval: time.Hour,
+		}
+		taskQueue := fmt.Sprintf("tollgate-capture-artifact-%s-%d", tc.name, time.Now().UnixNano())
+		w := e2eWorker(t, c, taskQueue, acts)
+
+		workflowID := fmt.Sprintf("tollgate-capture-artifact-%s-%d", tc.name, time.Now().UnixNano())
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: workflowID, TaskQueue: taskQueue}, ArtifactJobWorkflow, ArtifactJobInput{
+			JobID: "capture-" + tc.name, PieceID: "capture-piece", Repo: repo, SourceRef: sha,
+			Prompt: "capture fixture", AgentConfig: json.RawMessage(`{"model":"haiku"}`),
+			DestinationRoots: []string{"output"},
+			Overlays:         []workspace.Overlay{{Source: src, Dest: "output/plan.md"}},
+		})
+		require.NoError(t, err)
+		runErr := run.Get(ctx, nil)
+		cancel()
+		w.Stop()
+		if tc.wantErr {
+			require.Error(t, runErr)
+		} else {
+			require.NoError(t, runErr)
+		}
+
+		out, err := exec.Command("temporal", "workflow", "show", "--workflow-id", workflowID, "--output", "json").CombinedOutput()
+		require.NoError(t, err, "history capture for %q failed: %s", tc.name, out)
+		outPath := filepath.Join("testdata", "artifactjobworkflow_"+tc.name+".history.json")
+		require.NoError(t, os.WriteFile(outPath, out, 0o644))
+		t.Logf("captured %s (%d bytes)", outPath, len(out))
+	}
 }

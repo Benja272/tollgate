@@ -31,3 +31,20 @@ func TestJobWorkflow_ReplaysRejectHistory(t *testing.T) {
 	err := replayer.ReplayWorkflowHistoryFromJSONFile(nil, "testdata/jobworkflow_reject.history.json")
 	require.NoError(t, err, "the reject history must replay unchanged against the final JobWorkflow")
 }
+
+// TestArtifactJobWorkflow_ReplaysCapturedHistories is the determinism gate
+// for ArtifactJobWorkflow, captured at the end of the post-archive review.
+// No worker ran this workflow before then, which is why adding its first
+// activity (ValidateAgentConfig) needed no workflow.GetVersion; from here
+// on, any change that fails this replay does (ADR-0006 §10).
+func TestArtifactJobWorkflow_ReplaysCapturedHistories(t *testing.T) {
+	for _, name := range []string{"success", "billed"} {
+		t.Run(name, func(t *testing.T) {
+			replayer := worker.NewWorkflowReplayer()
+			replayer.RegisterWorkflow(ArtifactJobWorkflow)
+
+			err := replayer.ReplayWorkflowHistoryFromJSONFile(nil, "testdata/artifactjobworkflow_"+name+".history.json")
+			require.NoError(t, err)
+		})
+	}
+}
