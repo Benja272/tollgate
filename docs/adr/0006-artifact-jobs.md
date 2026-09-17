@@ -2,6 +2,9 @@
 
 Date: 2026-09-16
 Status: proposed
+Amended: 2026-09-17, after the post-archive review
+(`openspec/changes/archive/2026-09-16-artifact-jobs/post-archive-review.md`).
+Amended text is marked *(amended)*.
 
 ## Context
 
@@ -57,6 +60,13 @@ The existing code shapes the decision in four ways:
    - Each file is written to a fixed temporary name in its destination
      directory, flushed to disk with fsync, and then renamed into place.
      Each directory the overlay touched is then fsynced as well.
+   - *(amended)* The temporary file is created writable (0600) with
+     `O_CREAT|O_EXCL|O_NOFOLLOW`, after any leftover at that name is
+     removed. It gets the source's mode through its open handle just before
+     the fsync. A leftover read-only temp file therefore cannot block a
+     retry, and a symlink at the temporary name is replaced, never followed.
+   - *(amended)* Every directory the overlay creates is durable: its parent
+     is fsynced too, up to the first directory that already existed.
    - Once the activity completes, every file is durable and complete. A
      retry rewrites everything and produces the same tree.
 
@@ -71,8 +81,28 @@ The existing code shapes the decision in four ways:
      or physically (through a symlink on any existing component of a root or
      destination, or inside a source tree). Every overlay is checked before
      the first write.
-   - As a second line of defense, writes go through `os.Root`, which keeps
-     them inside the root directory.
+   - *(amended)* The check covers every future destination component of
+     every file in every source tree, including each file's temporary name.
+     The first version checked only each overlay's `Dest`, so a symlink
+     tracked at the pinned commit *below* a root (`output/sub ->
+     ../engine`) redirected writes into engine code. That was reproduced.
+   - *(amended)* The second line of defense is no longer `os.Root`, which
+     confines writes to the workspace, not to the roots. Every write opens
+     its directories one component at a time from a workspace descriptor
+     with `O_NOFOLLOW` (`openat`, `mkdirat`, `renameat`). A symlink planted
+     after the check is refused (`ErrOutsideRoots`), never followed. This
+     makes the overlay Unix-only, as the adapter already is.
+   - *(amended)* Also rejected before any write:
+     - source entries that are not regular files or directories;
+     - source entries whose name ends in the temporary-file suffix, which
+       could otherwise collide with another file's temporary name;
+     - a `.git` segment in any letter case, in a source tree or in a
+       destination (a planted `.git/config` with `core.fsmonitor` is a code
+       execution vector);
+     - a file overlay whose `Dest` equals a root.
+
+     Sources are opened with `O_NOFOLLOW`. Unreadable sources stay
+     retryable.
    - Tollgate cannot tell which directories hold engine code. Declaring roots
      that leave the engine outside is the operator's responsibility.
 
@@ -85,8 +115,38 @@ The existing code shapes the decision in four ways:
      `--strict-mcp-config`, `--permission-mode dontAsk` and
      `--permission-prompts none`, plus the model, the tool set and the
      allowlist.
-   - An empty block produces exactly the command the adapter built before
-     this change.
+   - *(amended)* The prompt is always the single operand after a `--`
+     terminator placed after every flag:
+     `claude -p --output-format json [flags] -- <prompt>`. The CLI takes the
+     prompt as a positional argument, so before this amendment a prompt
+     starting with `-` parsed as an option on both argv shapes.
+     `claude -p "--version"` printed the version, and a prompt of
+     `--dangerously-skip-permissions` would have passed the bypass flag.
+     Dash-leading prompts are legitimate (markdown lists) and are not
+     rejected. Verified on Claude Code 2.1.274:
+     `claude -p --model haiku --output-format json --allowedTools "Read" --
+     "--version is not a flag here. Reply PONG."` returns PONG. The
+     terminator therefore also closes the variadic `--allowedTools`.
+   - *(amended)* An empty block produces the minimal command
+     `-p --output-format json -- <prompt>`: the same flags as before this
+     change, with the prompt moved behind the terminator. This deliberately
+     changes the PR shape's argv, for security.
+   - *(amended)* Config values are validated and never rewritten. The
+     adapter rejects:
+     - trailing data after the JSON object;
+     - `tools` entries containing a comma, whitespace or a control
+       character (entries are joined with commas);
+     - `allowed_tools` entries with a control character, unbalanced
+       parentheses, or a comma or whitespace outside parentheses (the CLI
+       splits rule lists on those).
+
+     `"tools": []` emits `--tools ""` (no tools). An absent key emits
+     nothing (the CLI default).
+   - *(amended)* The workflow cannot parse the block without breaking
+     ADR-0002. So the first activity of an artifact job,
+     `ValidateAgentConfig`, asks the adapter to parse it through
+     `ports.AgentConfigValidator`, and requires a model. A bad block fails
+     non-retryably before any checkout or overlay.
    - The adapter has no way to express `bypassPermissions` or
      `--dangerously-skip-permissions`, and `--restricted` refuses bypass
      anyway.
@@ -139,8 +199,40 @@ The existing code shapes the decision in four ways:
    - The engine turns it into a non-retryable `AgentRunBilled` error with that
      result attached. The shared helper records the `run_agent` row, and only
      then does the job fail.
-   - With no parseable envelope (the process crashed or was killed), there is
-     no reported cost to record, and the failure stays retryable as before.
+   - *(amended)* With no parseable envelope there is no reported cost to
+     record, and nothing is written. That does not mean nothing was billed.
+     A run killed by its deadline, a cancellation or a signal before
+     printing an envelope returns `ports.UnmeteredRunError`. The engine
+     turns it into a non-retryable `AgentRunUnmetered` error, logs it with
+     `job_id` and attempt, and counts it on `tollgate.agent.unmetered_runs`.
+     A retry would bill again on top of an unknown amount. Only a run that
+     exited on its own without an envelope stays retryable, within the
+     attempt cap.
+   - *(amended)* A StartToClose timeout is decided by the server, which
+     retries whatever the activity returns afterwards. `RunAgent` therefore
+     kills the agent a margin before the activity deadline: 30 seconds, or
+     half the remaining time if that is shorter. The unmetered error then
+     reaches Temporal while the attempt is still live.
+   - *(amended)* The CLI runs in its own process group. Cancellation kills
+     the whole group, and `WaitDelay` (10 seconds) bounds the wait for
+     output pipes: a background process started by the agent's Bash tool
+     inherits stdout. Before this amendment, such a process held the runner
+     open past a printed, billed envelope until the activity timed out. When
+     the wait delay expires after a clean exit, the leftover group is
+     killed and the captured stdout is still parsed.
+   - *(amended)* An envelope must have `type` `"result"` and a present
+     `total_cost_usd`. It is found in the whole output, or else in the last
+     JSON line among noise lines. Run errors carry a bounded (2 KiB) stderr
+     tail.
+   - *(amended)* The billed error's details carry cost, usage and model,
+     but not the agent's output, which could exceed Temporal's payload
+     limit. The billed span records the same cost, usage and
+     `gen_ai.response.model` as the ledger row, and is still marked as an
+     error.
+   - *(amended)* If the details cannot be decoded, or the row cannot be
+     written, the job fails with a non-retryable `AgentRunBilledUnrecorded`
+     error. It is logged, its message says the spend was not recorded, and
+     the agent's error is its cause.
    - This deliberately fixes the PR shape's cost accounting on its error
      path. Cost accounting is a blocking review axis, and before this change a
      billed error run was dropped from the ledger and then silently retried,
@@ -152,11 +244,45 @@ The existing code shapes the decision in four ways:
      they contain no failed agent runs.
 
 9. **`piece_id` is a nullable ledger column.**
-   - It is not part of the natural key `(job_id, phase, actor, attempt)`.
+   - It is not part of the natural key.
+   - *(amended)* The natural key is `(job_id, run_id, phase, actor,
+     attempt)`. `run_id` is the Temporal run id of the execution, recorded
+     on every cost row of both job shapes. Re-running a piece under the same
+     `job_id`, for example to compare models, bills again. With the old key,
+     `ON CONFLICT DO NOTHING` dropped the second execution's row ($0.50 +
+     $0.80 was recorded as $0.50). That was reproduced against Postgres.
+     Retries within one execution still collide and stay idempotent.
+     `run_id` is `NOT NULL DEFAULT ''`, because a NULL would never conflict.
+     Migration 00004 was amended in place, since the branch was unmerged.
+     Its Down refuses to collapse executions rather than delete spend.
    - The cost of a piece is the sum over all of its jobs, whatever each job's
      outcome.
    - Knowing which pieces completed is the operator's concern, so the ledger
      has no job-status column.
+
+10. **Failure classification at the activity boundary** *(added)*.
+    A plain Go error reaches Temporal as retryable, whatever its
+    documentation says. Every permanent port sentinel is wrapped as a typed,
+    non-retryable application error, with the sentinel kept as its cause:
+
+    | Activity | Sentinel | Type |
+    |---|---|---|
+    | `CheckoutWorkspace` | `ErrCheckoutConflict`, `ErrInvalidRepo`, `ErrRefNotFound` | `CheckoutConflict`, `InvalidRepo`, `RefNotFound` |
+    | `ApplyOverlay` | `ErrOutsideRoots`, `ErrUnsupportedSource` | `OverlayOutsideRoots`, `OverlayUnsupportedSource` |
+    | `ValidateAgentConfig`, `RunAgent` | `ErrInvalidAgentConfig` | `InvalidAgentConfig` |
+    | `RunAgent` | `*RunError` / `*UnmeteredRunError` | `AgentRunBilled` / `AgentRunUnmetered` |
+
+    Tests assert the non-retryable flag and a single attempt through the
+    Temporal test environment.
+
+    **The artifact agent timeout is job input.** `AgentTimeoutMinutes`
+    ranges from 0 to 1440, and 0 means 60 minutes. The render phase drives
+    ffmpeg over footage and routinely exceeds the ten minutes a PR-shape
+    agent run gets. A run cut off by the timeout is unmetered and never
+    retried, so a default that is too short turns into lost, unrecorded
+    spend. An hour covers a render with margin and still bounds a hung run.
+    `JobWorkflow` keeps its 10-minute agent timeout. Its activity options
+    are pinned by a test, because the replay test cannot see them.
 
 ## Rationale
 
@@ -201,10 +327,19 @@ The existing code shapes the decision in four ways:
 ## Consequences
 
 - **No automatic workspace cleanup.** The workspace is how artifacts are
-  handed off, so disk use grows until an operator runs
-  `git worktree remove`.
+  handed off, so disk use grows until an operator cleans up by hand. From
+  the source clone, run
+  `git -C <repo> worktree remove --force <WorkspaceRoot>/tollgate-artifact-<job_id>`.
+  If the directory was already deleted, run `git -C <repo> worktree prune`
+  to drop the stale administrative entry. A job overlay leaves untracked
+  files, so re-running the same `job_id` requires removing its worktree
+  first (see the next item).
 - **Strict checkout reuse.** An existing checkout is reused only if it
   shares the object store, `HEAD` is at the SHA, and `git status` is clean.
+  *(amended)* It must also be the root of a *linked* worktree: its resolved
+  path must equal `rev-parse --show-toplevel`, and its git dir must differ
+  from the common dir. Common dirs are compared after resolving symlinks.
+  `worktree add` receives its path after `--`.
   Any other existing path is a non-retryable conflict. A checkout that
   crashed halfway must be removed by hand.
 - **Replay-tested history.** The `JobWorkflow` history is replay-tested
@@ -213,4 +348,7 @@ The existing code shapes the decision in four ways:
   envelope is no longer retried automatically, and its spend now appears in
   the ledger.
 - **Remaining unrecorded spend.** A run killed before it printed an envelope
-  is still unmeasured.
+  is still unmeasured. *(amended)* It is no longer silent: it is logged,
+  counted, and never retried. A worker that dies mid-run is detected by the
+  heartbeat timeout and retried by the server; that retry can still bill a
+  second time.

@@ -249,7 +249,7 @@ func TestRecording_End_SetsGenAIResponseModelWhenPresent(t *testing.T) {
 
 	// The run_agent call site never sets Call.Model up front (the harness
 	// picks the model); it only becomes known once the run reports back —
-	// exactly like the coding-agent run this exercises (ADR-0006 D4).
+	// exactly like the coding-agent run this exercises (ADR-0006 §7).
 	_, rec := h.inst.StartInvokeAgent(context.Background(), telemetry.Call{
 		JobID: "job-9", Phase: "run_agent", Actor: "agent", AgentName: "coding-agent",
 	})

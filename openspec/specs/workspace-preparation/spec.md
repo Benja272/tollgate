@@ -24,7 +24,7 @@ For an artifact job, the workspace MUST be a git worktree of `Repo` checked out 
 
 #### Scenario: Conflicting path fails non-retryably
 
-- GIVEN an existing path at the workspace location that is not a worktree at `SourceRef`
+- GIVEN an existing path at the workspace location that is not the root of a clean, linked worktree of `Repo` at `SourceRef` (compared after resolving symlinks; a subdirectory of such a worktree, or the repository's main worktree, is a conflict)
 - WHEN checkout runs
 - THEN it fails non-retryably
 
@@ -37,6 +37,8 @@ For an artifact job, the workspace MUST be a git worktree of `Repo` checked out 
 ### Requirement: Durable, Root-Bounded Overlay
 
 The overlay MUST place files atomically, inside the declared destination roots only, as its own activity. The overlay MUST reject any symlink found anywhere inside an overlay source before writing any file.
+
+*(Made more precise by the post-archive review, B1-B4.)* Before any write, the overlay MUST check every future destination path component, including each file's temporary name, and reject an existing symlink on any of them. Writes MUST NOT follow a symlink even if one appears after that check. The overlay MUST reject source entries that are not regular files or directories, that end in the temporary-file suffix, or that contain a `.git` segment in any letter case, and destination paths with either reserved name. A file overlay whose destination equals a declared root MUST be rejected. Every directory the overlay creates MUST be durable: its parent is fsynced. A leftover temporary file of any mode MUST NOT block a retry.
 
 #### Scenario: Retry leaves no partial file
 
@@ -53,6 +55,18 @@ The overlay MUST place files atomically, inside the declared destination roots o
 #### Scenario: Symlink escape rejected
 
 - GIVEN an overlay destination that resolves, via a symlink, outside every declared root
+- WHEN the overlay activity runs
+- THEN it fails non-retryably and no file is written
+
+#### Scenario: Symlink below a root, tracked at the pinned commit, rejected
+
+- GIVEN a symlink at the pinned commit below a declared root that points at files outside every root
+- WHEN an overlay would write through it, or through a symlink sitting at a file's temporary name
+- THEN the overlay fails non-retryably and the files outside the roots are unchanged in content and mode
+
+#### Scenario: Reserved names in a source rejected
+
+- GIVEN an overlay source tree containing a `.git` (any case) segment, an entry ending in the temporary-file suffix, or a FIFO
 - WHEN the overlay activity runs
 - THEN it fails non-retryably and no file is written
 

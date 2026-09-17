@@ -77,7 +77,7 @@ func TestActivities_RunAgent_ReturnsAgentCost(t *testing.T) {
 // billedRunner simulates a harness that produced a parseable result
 // envelope before failing: the run is billed, and RunAgent must map it to a
 // non-retryable AgentRunBilled application error carrying the partial
-// result (ADR-0006 D14).
+// result (ADR-0006 §8).
 type billedRunner struct{ result ports.RunResult }
 
 func (r billedRunner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, error) {
@@ -182,7 +182,7 @@ func TestActivities_CheckoutWorkspace_DelegatesToPort(t *testing.T) {
 	require.Equal(t, "/abs/repo", fc.gotRepo)
 	require.Equal(t, "abc123", fc.gotSHA)
 	require.Equal(t, wantPath, fc.gotPath,
-		"CheckoutWorkspace builds the path (ADR-0006 D7); the git adapter never does")
+		"CheckoutWorkspace builds the path; the git adapter never does")
 }
 
 func TestActivities_CheckoutWorkspace_PropagatesPortError(t *testing.T) {
@@ -248,7 +248,7 @@ func (r *capturingRunner) Run(ctx context.Context, spec ports.RunSpec) (ports.Ru
 
 // TestActivities_RunAgent_PassesAgentConfigToPort closes a wiring gap: an
 // ArtifactJobInput's AgentConfig (Task 10) must actually reach the adapter
-// through ports.RunSpec, or the whole D1-D4 config plumbing added in Tasks
+// through ports.RunSpec, or the whole agent-config plumbing added in Tasks
 // 2-4 would be unreachable dead code for real artifact jobs.
 func TestActivities_RunAgent_PassesAgentConfigToPort(t *testing.T) {
 	runner := &capturingRunner{next: ports.RunResult{CostUSD: 0.1}}

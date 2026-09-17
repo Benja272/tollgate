@@ -29,7 +29,7 @@ type ArtifactJobInput struct {
 	AgentConfig json.RawMessage
 
 	// DestinationRoots bounds every overlay destination; at least one is
-	// required (ADR-0006 D9).
+	// required (ADR-0006 §4).
 	DestinationRoots []string
 	Overlays         []workspace.Overlay
 

@@ -10,6 +10,8 @@ Defines the no-PR job shape that runs one headless agent turn over a pinned work
 
 The workflow MUST validate `SourceRef`, `agent_config`, `job_id`, and destination roots before any paid call, failing non-retryably on violation. `SourceRef` MUST be exactly 40 hexadecimal characters; both uppercase and lowercase hex digits are accepted and the value MUST be normalized to lowercase before use. Surrounding whitespace MUST be rejected, not trimmed. `agent_config` MUST be present and non-empty; an empty or `null` value fails validation. A destination root MUST NOT equal `.` after path cleaning and MUST NOT contain a `.git` path segment. `job_id` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; any value that does not match is unsafe and MUST be rejected.
 
+*(Added by the post-archive review.)* `Repo` MUST be an absolute path. `Prompt` MUST NOT be blank. `piece_id` MAY be omitted but MUST NOT be blank. `agent_timeout_minutes` MUST be between 0 and 1440; 0 means the 60-minute default. The adapter MUST parse `agent_config`, and it MUST name a model; this check is the job's first activity and MUST fail non-retryably before any checkout or overlay. Workflow code cannot parse the adapter's config format without breaking ADR-0002.
+
 #### Scenario: Non-SHA source ref rejected
 
 - GIVEN a `SourceRef` that is a branch, a tag, or a short SHA
@@ -70,11 +72,27 @@ The workflow MUST validate `SourceRef`, `agent_config`, `job_id`, and destinatio
 - WHEN the artifact job starts
 - THEN it fails non-retryably with an invalid-input error before any activity runs
 
+#### Scenario: Unparseable or model-less agent_config rejected before checkout
+
+- GIVEN an `agent_config` the adapter rejects, or one that names no model
+- WHEN the artifact job starts
+- THEN it fails non-retryably, and no checkout, overlay or agent run happens
+
 #### Scenario: Unsafe job_id rejected
 
 - GIVEN a `job_id` that does not match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 - WHEN the artifact job starts
 - THEN it fails non-retryably before any paid call
+
+### Requirement: Permanent Failures Are Not Retried
+
+Checkout conflicts, invalid repositories, unresolvable refs, overlay boundary and source violations, and invalid agent configs MUST reach Temporal as non-retryable errors, and MUST be attempted once. The agent run's timeout for an artifact job MUST be configurable, and the agent MUST be stopped before the activity deadline so that a timed-out run is reported as unmetered rather than retried by the server. *(Added by the post-archive review, B6/B10.)*
+
+#### Scenario: Checkout conflict attempted once
+
+- GIVEN a workspace path that conflicts with the requested checkout
+- WHEN the artifact job runs
+- THEN the checkout activity runs exactly once and the job fails non-retryably
 
 ### Requirement: No PR, No Gate
 
@@ -94,13 +112,13 @@ An artifact job MUST NOT invoke `Ship`, run judges, or evaluate a gate.
 
 ### Requirement: Coexistence with the PR-Shaped JobWorkflow
 
-Adding `ArtifactJobWorkflow` MUST NOT change `JobWorkflow` behavior, EXCEPT for two recorded-data changes that add, remove, and reorder no step: (a) the billed-failure cost-accounting fix (see Cost Ledger: Billed Failure Is Recorded Before the Job Fails), which applies to `JobWorkflow` as well as to artifact jobs; and (b) on the success path, its `run_agent` cost rows now record the model and its `invoke_agent` spans now carry `gen_ai.response.model`.
+Adding `ArtifactJobWorkflow` MUST NOT change `JobWorkflow` behavior, EXCEPT for these changes, none of which adds, removes or reorders a step. The post-archive review added the run id on every cost row, the non-retryable classification of unmetered runs and invalid configs, and the prompt terminator in the agent's argv. The original change made two recorded-data changes: (a) the billed-failure cost-accounting fix (see Cost Ledger: Billed Failure Is Recorded Before the Job Fails), which applies to `JobWorkflow` as well as to artifact jobs; and (b) on the success path, its `run_agent` cost rows now record the model and its `invoke_agent` spans now carry `gen_ai.response.model`.
 
 #### Scenario: Existing PR-shape tests pass unchanged
 
 - GIVEN the existing `workflow_test.go` and `crash_resume_test.go` suites
 - WHEN they run after this change
-- THEN they pass without any edited assertions
+- THEN they pass without any edited assertions, except that the expected cost rows now carry the run id (post-archive review, B8)
 
 #### Scenario: Pre-change history replays cleanly
 

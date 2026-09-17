@@ -80,11 +80,13 @@ and the model now riding on `run_agent` cost rows and `invoke_agent` spans.
 **Billed failures are recorded before the job fails**, in both job shapes: if
 the agent harness reports `is_error=true` (or exits non-zero with a
 parseable result envelope), the run is billed, and `runAgentAndRecord`
-records that partial cost row before the job terminally fails. A crash or a
-kill with no parseable envelope records nothing and keeps its ordinary
-retryable behavior.
+records that partial cost row before the job terminally fails. A run killed
+before printing an envelope records nothing, since its spend is unknown. It
+is logged, counted as unmetered, and never retried. Every cost row carries
+the Temporal run id, so re-running the same job keeps each execution's
+spend.
 
-See `docs/adr/0006-artifact-jobs.md` for the full design (decisions D1-D14)
+See `docs/adr/0006-artifact-jobs.md` for the full design (decisions §1-§10)
 and `docs/artifact-job-cli.md` for how to submit one.
 
 ## 3. Data model (first cut)
