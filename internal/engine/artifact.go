@@ -93,9 +93,11 @@ func validate(in ArtifactJobInput) (ArtifactJobInput, error) {
 	if in.PieceID != "" && strings.TrimSpace(in.PieceID) == "" {
 		return in, invalidInput("piece_id must be omitted or non-blank")
 	}
-	if timeout := time.Duration(in.AgentTimeoutMinutes) * time.Minute; timeout < 0 || timeout > maxArtifactAgentTimeout {
+	// Bounds are checked on the minutes themselves: multiplying first by
+	// time.Minute can wrap a huge value into a small, valid-looking duration.
+	if maxMinutes := int(maxArtifactAgentTimeout / time.Minute); in.AgentTimeoutMinutes < 0 || in.AgentTimeoutMinutes > maxMinutes {
 		return in, invalidInput("agent_timeout_minutes must be between 0 and %d, got %d",
-			int(maxArtifactAgentTimeout/time.Minute), in.AgentTimeoutMinutes)
+			maxMinutes, in.AgentTimeoutMinutes)
 	}
 
 	if isEmptyAgentConfig(in.AgentConfig) {

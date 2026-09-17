@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -503,6 +504,11 @@ func TestArtifactJobWorkflow_InvalidInput_ReviewAdditions(t *testing.T) {
 		"whitespace piece id":      func(in *ArtifactJobInput) { in.PieceID = "   " },
 		"negative agent timeout":   func(in *ArtifactJobInput) { in.AgentTimeoutMinutes = -1 },
 		"agent timeout over a day": func(in *ArtifactJobInput) { in.AgentTimeoutMinutes = 24*60 + 1 },
+		// time.Duration(m)*time.Minute wraps for these; the bounds check must
+		// run on the minutes, before multiplying (review R2).
+		"timeout wrapping to zero":     func(in *ArtifactJobInput) { in.AgentTimeoutMinutes = 1 << 53 },
+		"timeout wrapping to a minute": func(in *ArtifactJobInput) { in.AgentTimeoutMinutes = 1<<53 + 1 },
+		"max int timeout":              func(in *ArtifactJobInput) { in.AgentTimeoutMinutes = math.MaxInt },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -612,7 +618,7 @@ func TestWorkflows_RetryCaps(t *testing.T) {
 			run: func(env *testsuite.TestWorkflowEnvironment) {
 				env.ExecuteWorkflow(JobWorkflow, JobInput{JobID: "job-c", Prompt: "p"})
 			},
-			activity: "RunAgent", want: runAgentMaxAttempts,
+			activity: "RunAgent", want: 2,
 		},
 		"JobWorkflow Prepare uses the server default (unbounded) policy": {
 			setup: func(env *testsuite.TestWorkflowEnvironment) {
@@ -643,7 +649,7 @@ func TestWorkflows_RetryCaps(t *testing.T) {
 			run: func(env *testsuite.TestWorkflowEnvironment) {
 				env.ExecuteWorkflow(ArtifactJobWorkflow, validArtifactInput())
 			},
-			activity: "RunAgent", want: runAgentMaxAttempts,
+			activity: "RunAgent", want: 2,
 		},
 		"ArtifactJobWorkflow CheckoutWorkspace": {
 			setup: func(env *testsuite.TestWorkflowEnvironment) {
@@ -840,4 +846,93 @@ func TestJudgeOne_JudgmentCarriesThePayingRunID(t *testing.T) {
 	var got ports.Judgment
 	require.NoError(t, val.Get(&got))
 	require.NotEmpty(t, got.PaidByRunID)
+}
+
+func TestArtifactJobWorkflow_AgentTimeout_UpperBoundAccepted(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+	starts := watchActivities(env)
+	mockArtifactActivities(env)
+	var acts *Activities
+	env.OnActivity(acts.RecordCosts, mock.Anything, mock.Anything).Return(nil)
+	in := validArtifactInput()
+	in.AgentTimeoutMinutes = 1440
+
+	env.ExecuteWorkflow(ArtifactJobWorkflow, in)
+
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, 24*time.Hour, starts.info(t, "RunAgent").StartToCloseTimeout)
+}
+
+// A budget below the kill margin refuses the run before anything starts:
+// nothing was spent, so it is not an unmetered run.
+func TestActivities_RunAgent_BudgetBelowMargin_RefusedNothingSpentNotCounted(t *testing.T) {
+	tel := newRecordingTelemetry(t)
+	runner := &validatingRunner{bound: 5 * time.Second}
+	acts := &Activities{Agent: runner, HeartbeatInterval: time.Hour, Telemetry: tel.inst}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := acts.RunAgent(ctx, RunAgentInput{JobID: "job-b", Attempt: 1})
+
+	requireNonRetryableType(t, err, errTypeAgentRunBudgetTooShort)
+	require.Zero(t, runner.runs.Load(), "the agent must not start")
+	require.Zero(t, int64Sum(t, tel, "tollgate.agent.unmetered_runs"))
+}
+
+// recordingLogger captures log calls from the Temporal test environment.
+type recordingLogger struct {
+	mu      sync.Mutex
+	entries []logEntry
+}
+
+type logEntry struct {
+	level, msg string
+	fields     map[string]any
+}
+
+func (l *recordingLogger) log(level, msg string, keyvals []any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fields := map[string]any{}
+	for i := 0; i+1 < len(keyvals); i += 2 {
+		if k, ok := keyvals[i].(string); ok {
+			fields[k] = keyvals[i+1]
+		}
+	}
+	l.entries = append(l.entries, logEntry{level, msg, fields})
+}
+
+func (l *recordingLogger) Debug(msg string, kv ...any) { l.log("debug", msg, kv) }
+func (l *recordingLogger) Info(msg string, kv ...any)  { l.log("info", msg, kv) }
+func (l *recordingLogger) Warn(msg string, kv ...any)  { l.log("warn", msg, kv) }
+func (l *recordingLogger) Error(msg string, kv ...any) { l.log("error", msg, kv) }
+
+func TestActivities_RunAgent_Unmetered_LogCarriesJobAndAttempt(t *testing.T) {
+	logger := &recordingLogger{}
+	var ts testsuite.WorkflowTestSuite
+	ts.SetLogger(logger)
+	env := ts.NewTestActivityEnvironment()
+	acts := &Activities{
+		Agent: &validatingRunner{run: func(context.Context) (ports.RunResult, error) {
+			return ports.RunResult{}, &ports.UnmeteredRunError{Err: errors.New("signal: killed")}
+		}},
+		HeartbeatInterval: time.Hour,
+	}
+	env.RegisterActivity(acts.RunAgent)
+
+	_, err := env.ExecuteActivity(acts.RunAgent, RunAgentInput{JobID: "job-logged", Attempt: 3})
+	requireNonRetryableType(t, err, errTypeAgentRunUnmetered)
+
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+	var found bool
+	for _, e := range logger.entries {
+		if e.level == "error" && strings.Contains(e.msg, "unmetered agent run") {
+			found = true
+			require.Equal(t, "job-logged", e.fields["job_id"])
+			require.Equal(t, int32(3), e.fields["attempt"])
+		}
+	}
+	require.True(t, found, "the unmetered run must be logged")
 }

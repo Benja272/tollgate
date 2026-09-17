@@ -53,6 +53,9 @@ const (
 	// cost (ADR-0006 §8): it may have billed an unknown amount, so it is
 	// never retried automatically.
 	errTypeAgentRunUnmetered = "AgentRunUnmetered"
+	// errTypeAgentRunBudgetTooShort marks a run refused before it started:
+	// the activity budget is below the kill margin. Nothing was spent.
+	errTypeAgentRunBudgetTooShort = "AgentRunBudgetTooShort"
 )
 
 // nonRetryable is one sentinel-to-type mapping for asNonRetryable.
@@ -204,6 +207,13 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 
 	runCtx, cancel := a.agentRunContext(ctx)
 	defer cancel()
+	if runCtx.Err() != nil && ctx.Err() == nil {
+		err := temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("agent run refused: the activity budget is below the %s kill margin", a.runDeadlineMargin()),
+			errTypeAgentRunBudgetTooShort, nil)
+		rec.End(ctx, telemetry.Result{}, err)
+		return AgentResult{}, err
+	}
 
 	var res ports.RunResult
 	err := a.withHeartbeat(ctx, func() error {
@@ -253,8 +263,8 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 
 // agentRunContext bounds the agent run to end runDeadlineMargin before the
 // activity deadline. With no deadline it only adds cancellation. If the
-// budget is smaller than the margin, the run context is already done: the
-// run is refused rather than started without time to shut down cleanly.
+// budget is smaller than the margin, the run context is already done and
+// RunAgent refuses the run rather than start it without time to shut down.
 func (a *Activities) agentRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
