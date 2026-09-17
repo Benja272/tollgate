@@ -117,15 +117,26 @@ func (u envelopeUsage) toPort() ports.TokenUsage {
 	}
 }
 
+var _ ports.ShutdownBounder = (*Runner)(nil)
+
 // ValidateConfig checks cfg exactly as Run would, without starting the CLI,
-// and reports the model it requests.
-func (r *Runner) ValidateConfig(cfg json.RawMessage) (string, error) {
+// plus the job shape's requirements.
+func (r *Runner) ValidateConfig(cfg json.RawMessage, req ports.AgentConfigRequirements) error {
 	c, _, err := parseAgentConfig(cfg)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return c.Model, nil
+	if req.RequireModel && c.Model == "" {
+		return invalidConfig("this job requires a model")
+	}
+	return nil
 }
+
+// ShutdownBound is how long Run can take after its context is done: the
+// group kill is immediate, then Run waits at most WaitDelay for the output
+// pipes. Parsing what was captured is bounded by the stdout size and is left
+// to the engine's slack.
+func (r *Runner) ShutdownBound() time.Duration { return r.waitDelay() }
 
 func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, error) {
 	args, err := buildArgs(spec.Prompt, spec.AgentConfig)

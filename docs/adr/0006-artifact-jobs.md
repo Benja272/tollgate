@@ -142,11 +142,21 @@ The existing code shapes the decision in four ways:
 
      `"tools": []` emits `--tools ""` (no tools). An absent key emits
      nothing (the CLI default).
-   - *(amended)* The workflow cannot parse the block without breaking
-     ADR-0002. So the first activity of an artifact job,
-     `ValidateAgentConfig`, asks the adapter to parse it through
-     `ports.AgentConfigValidator`, and requires a model. A bad block fails
-     non-retryably before any checkout or overlay.
+   - *(amended)* A new activity, `ValidateAgentConfig`, is the first step of
+     an artifact job. Workflow code cannot parse the block, because the
+     format belongs to the adapter (ADR-0002). The engine never parses agent
+     settings; it only states what the job shape requires.
+   - *(amended)* The activity calls the optional port
+     `ports.AgentConfigValidator` with
+     `AgentConfigRequirements{RequireModel: true}`. The adapter parses the
+     block exactly as `Run` would and enforces the requirement in its own
+     terms. An artifact job measures cost per model, so it must never run
+     on the harness default.
+   - *(amended)* A failure is a non-retryable `InvalidAgentConfig` error,
+     attempted once before any checkout or overlay. Tests assert this
+     through the Temporal test environment. A runner that cannot validate
+     without running is trusted at this step and is checked again by
+     `RunAgent`.
    - The adapter has no way to express `bypassPermissions` or
      `--dangerously-skip-permissions`, and `--restricted` refuses bypass
      anyway.
@@ -210,9 +220,20 @@ The existing code shapes the decision in four ways:
      attempt cap.
    - *(amended)* A StartToClose timeout is decided by the server, which
      retries whatever the activity returns afterwards. `RunAgent` therefore
-     kills the agent a margin before the activity deadline: 30 seconds, or
-     half the remaining time if that is shorter. The unmetered error then
-     reaches Temporal while the attempt is still live.
+     stops the agent a margin before the activity deadline, so the
+     unmetered error reaches Temporal while the attempt is still live.
+   - *(amended)* The margin is derived, not a second independent constant:
+     - It is the runner's shutdown bound (`ports.ShutdownBounder`) plus a
+       2-second return slack. The slack covers parsing the output, mapping
+       the error, ending the span and reporting the result.
+     - For Claude Code the bound is the runner's `WaitDelay`, because the
+       group kill is immediate. That makes the default margin 12 seconds.
+     - A runner that states no bound gets 30 seconds.
+     - If the activity budget is smaller than the margin, the run is
+       refused rather than started without time to shut down.
+     - A real-runner test pins the invariant with an escaped child
+       process: it forces the full `WaitDelay`, and the activity must still
+       return before its deadline.
    - *(amended)* The CLI runs in its own process group. Cancellation kills
      the whole group, and `WaitDelay` (10 seconds) bounds the wait for
      output pipes: a background process started by the agent's Bash tool
@@ -349,6 +370,16 @@ The existing code shapes the decision in four ways:
   the ledger.
 - **Remaining unrecorded spend.** A run killed before it printed an envelope
   is still unmeasured. *(amended)* It is no longer silent: it is logged,
-  counted, and never retried. A worker that dies mid-run is detected by the
-  heartbeat timeout and retried by the server; that retry can still bill a
-  second time.
+  counted, and never retried.
+- **Residual case the margin cannot cover** *(added)*. Sometimes the worker
+  cannot return anything:
+  - the worker process crashes;
+  - the host dies;
+  - heartbeats are lost long enough for `HeartbeatTimeout` to expire.
+
+  Then the server times the attempt out and retries it under the activity's
+  retry policy. That attempt's spend stays unmetered: nothing records it,
+  nothing counts it, and the retry can bill again. The bound is the retry
+  cap, `runAgentMaxAttempts` (2). Closing this gap needs a record written
+  before the agent starts (an intent row reconciled after the fact), which
+  is out of scope here.

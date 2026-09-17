@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrInvalidAgentConfig is returned when AgentConfig fails to parse or
@@ -62,11 +63,28 @@ type AgentRunner interface {
 
 // AgentConfigValidator is implemented by runners that can check an
 // AgentConfig without starting the harness, so a job can fail on a bad
-// config before any workspace is prepared. It returns the model the config
-// requests, empty when it names none; the format stays the adapter's
-// (ADR-0002).
+// config before any workspace is prepared. The format stays the adapter's
+// (ADR-0002): the engine states what the job shape requires, and the adapter
+// decides how its format meets it. A failure wraps ErrInvalidAgentConfig.
 type AgentConfigValidator interface {
-	ValidateConfig(cfg json.RawMessage) (requestedModel string, err error)
+	ValidateConfig(cfg json.RawMessage, req AgentConfigRequirements) error
+}
+
+// AgentConfigRequirements are job-shape rules a config must satisfy on top
+// of the adapter's own.
+type AgentConfigRequirements struct {
+	// RequireModel demands that the config pin a model: an artifact job
+	// measures cost per model, so it must never run on the harness default.
+	RequireModel bool
+}
+
+// ShutdownBounder is implemented by runners that can bound how long Run
+// takes to return once its context is done: killing the harness, waiting
+// for its output, and reading it. The engine stops the agent at least that
+// long before the activity deadline, so a killed run is reported while the
+// attempt is still live (ADR-0006 §8).
+type ShutdownBounder interface {
+	ShutdownBound() time.Duration
 }
 
 // RunError wraps a partial RunResult with the error that ended the run. It

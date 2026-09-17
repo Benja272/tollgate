@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/Benja272/tollgate/internal/adapters/claudecode"
 	"github.com/Benja272/tollgate/internal/gate"
 	"github.com/Benja272/tollgate/internal/ports"
 	"github.com/Benja272/tollgate/internal/workspace"
@@ -94,17 +98,29 @@ func (s *activityStarts) info(t *testing.T, name string) activity.Info {
 }
 
 // validatingRunner is an AgentRunner that also validates configs, the way
-// claudecode.Runner does, with a scripted outcome.
+// claudecode.Runner does, with a scripted outcome. It enforces the model
+// requirement itself, as the adapter must, and records what it was asked.
 type validatingRunner struct {
 	model       string
 	validateErr error
 	run         func(ctx context.Context) (ports.RunResult, error)
 	runs        atomic.Int32
+	gotReq      ports.AgentConfigRequirements
+	bound       time.Duration
 }
 
-func (r *validatingRunner) ValidateConfig(json.RawMessage) (string, error) {
-	return r.model, r.validateErr
+func (r *validatingRunner) ValidateConfig(_ json.RawMessage, req ports.AgentConfigRequirements) error {
+	r.gotReq = req
+	if r.validateErr != nil {
+		return r.validateErr
+	}
+	if req.RequireModel && r.model == "" {
+		return errors.Join(ports.ErrInvalidAgentConfig, errors.New("model required"))
+	}
+	return nil
 }
+
+func (r *validatingRunner) ShutdownBound() time.Duration { return r.bound }
 
 func (r *validatingRunner) Run(ctx context.Context, _ ports.RunSpec) (ports.RunResult, error) {
 	r.runs.Add(1)
@@ -272,6 +288,7 @@ func TestArtifactJobWorkflow_InvalidAgentConfig_FailsBeforeCheckout(t *testing.T
 			require.Equal(t, 1, starts.count("ValidateAgentConfig"))
 			require.Zero(t, checkout.calls.Load(), "a bad config must fail before any checkout")
 			require.Zero(t, runner.runs.Load())
+			require.True(t, runner.gotReq.RequireModel, "the artifact-job requirement is enforced by the adapter")
 		})
 	}
 }
@@ -342,18 +359,17 @@ func TestActivities_RunAgent_Unmetered_LoggedAndCounted(t *testing.T) {
 	require.Equal(t, int64(1), int64Sum(t, tel, "tollgate.agent.unmetered_runs"))
 }
 
-func TestActivities_RunAgent_KillsAgentBeforeActivityDeadline(t *testing.T) {
+func TestActivities_RunAgent_MarginDerivedFromRunnerShutdownBound(t *testing.T) {
 	var agentDeadline time.Time
 	acts := &Activities{
-		Agent: &validatingRunner{run: func(ctx context.Context) (ports.RunResult, error) {
+		Agent: &validatingRunner{bound: 500 * time.Millisecond, run: func(ctx context.Context) (ports.RunResult, error) {
 			agentDeadline, _ = ctx.Deadline()
 			<-ctx.Done()
 			return ports.RunResult{}, &ports.UnmeteredRunError{Err: ctx.Err()}
 		}},
 		HeartbeatInterval: time.Hour,
-		RunDeadlineMargin: 500 * time.Millisecond,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	activityDeadline, _ := ctx.Deadline()
 
@@ -361,7 +377,49 @@ func TestActivities_RunAgent_KillsAgentBeforeActivityDeadline(t *testing.T) {
 
 	requireNonRetryableType(t, err, errTypeAgentRunUnmetered)
 	require.NoError(t, ctx.Err(), "the activity must return before its own deadline, or the server retries regardless")
-	require.WithinDuration(t, activityDeadline.Add(-500*time.Millisecond), agentDeadline, 10*time.Millisecond)
+	require.WithinDuration(t, activityDeadline.Add(-(500*time.Millisecond + runReturnSlack)), agentDeadline, 10*time.Millisecond)
+}
+
+// The margin must cover the adapter's whole shutdown path — group kill,
+// WaitDelay for a process that escaped the group and still holds stdout,
+// envelope parse, returning the error — or the server times the attempt out
+// first and retries it. This pins that with the real runner.
+func TestActivities_RunAgent_RealRunnerShutdownFinishesBeforeActivityDeadline(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skipf("setsid not available: %v", err)
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "escaped.pid")
+	bin := filepath.Join(dir, "claude")
+	// The escaped child leaves the process group, so the group kill cannot
+	// close its copy of stdout: only WaitDelay ends the wait.
+	script := "#!/bin/sh\nsetsid sh -c 'echo $$ > " + pidFile + "; exec sleep 60' &\nexec sleep 60\n"
+	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); convErr == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+
+	acts := &Activities{
+		Agent:             &claudecode.Runner{Bin: bin, WaitDelay: 3 * time.Second},
+		HeartbeatInterval: time.Hour,
+	}
+	// One second of agent time on top of the derived margin: a margin that
+	// ignored the WaitDelay would still be shutting down at the deadline.
+	timeout := 3*time.Second + runReturnSlack + time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	start := time.Now()
+	_, err := acts.RunAgent(ctx, RunAgentInput{JobID: "job-s", Workspace: Workspace{Path: dir}, Prompt: "render", Attempt: 1})
+	elapsed := time.Since(start)
+
+	requireNonRetryableType(t, err, errTypeAgentRunUnmetered)
+	require.NoError(t, ctx.Err(), "shutdown took %s of a %s activity budget", elapsed, timeout)
+	require.GreaterOrEqual(t, elapsed, time.Second+3*time.Second, "the WaitDelay path was exercised")
 }
 
 // --- B9: billed failures reach telemetry, details stay small ---------------

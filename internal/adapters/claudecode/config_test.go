@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -165,17 +166,27 @@ func TestParseAgentConfig_AcceptsRulesWithSpacesAndCommasInsideParentheses(t *te
 
 func TestRunner_ValidateConfig(t *testing.T) {
 	r := &Runner{Bin: "unused"}
+	artifact := ports.AgentConfigRequirements{RequireModel: true}
 
-	model, err := r.ValidateConfig(json.RawMessage(`{"model":"haiku","allowed_tools":["Read"]}`))
-	require.NoError(t, err)
-	assert.Equal(t, "haiku", model)
+	require.NoError(t, r.ValidateConfig(json.RawMessage(`{"model":"haiku","allowed_tools":["Read"]}`), artifact))
+	require.NoError(t, r.ValidateConfig(json.RawMessage(`{"allowed_tools":["Read"]}`), ports.AgentConfigRequirements{}),
+		"without the requirement a model-less config is valid")
 
-	model, err = r.ValidateConfig(json.RawMessage(`{"allowed_tools":["Read"]}`))
-	require.NoError(t, err)
-	assert.Empty(t, model, "the adapter reports the requested model; requiring one is the caller's policy")
+	for name, cfg := range map[string]string{
+		"model missing": `{"allowed_tools":["Read"]}`,
+		"model empty":   `{"model":""}`,
+		"null config":   `null`,
+		"unknown field": `{"model":"haiku","bogus":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorIs(t, r.ValidateConfig(json.RawMessage(cfg), artifact), ports.ErrInvalidAgentConfig)
+		})
+	}
+}
 
-	_, err = r.ValidateConfig(json.RawMessage(`{"model":"haiku","bogus":1}`))
-	require.ErrorIs(t, err, ports.ErrInvalidAgentConfig)
+func TestRunner_ShutdownBound_IsTheWaitDelay(t *testing.T) {
+	assert.Equal(t, defaultWaitDelay, (&Runner{}).ShutdownBound())
+	assert.Equal(t, 3*time.Second, (&Runner{WaitDelay: 3 * time.Second}).ShutdownBound())
 }
 
 // flagArity is every flag buildArgs may emit and how many values it takes;

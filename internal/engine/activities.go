@@ -25,13 +25,19 @@ import (
 // worker.
 const defaultHeartbeatInterval = 2 * time.Second
 
-// defaultRunDeadlineMargin is how long before its activity deadline RunAgent
-// kills the agent. A StartToClose timeout is decided by the server, which
-// then retries whatever the activity returns later; killing the agent first
-// lets RunAgent report the run as unmetered and non-retryable while its
-// attempt is still live. Rounding the margin down for short deadlines keeps
-// most of the budget for the agent.
-const defaultRunDeadlineMargin = 30 * time.Second
+// RunAgent stops the agent a margin before its activity deadline. A
+// StartToClose timeout is decided by the server, which retries whatever the
+// activity returns afterwards; the unmetered, non-retryable error must reach
+// Temporal while the attempt is still live. The margin is the runner's own
+// shutdown bound (ports.ShutdownBounder) plus runReturnSlack, so it always
+// covers the whole kill path; defaultShutdownBound stands in for runners
+// that cannot state one.
+const (
+	defaultShutdownBound = 30 * time.Second
+	// runReturnSlack covers parsing the captured output, mapping the error,
+	// ending the span and reporting the result to the server.
+	runReturnSlack = 2 * time.Second
+)
 
 // Temporal application error types for failures retrying cannot fix. Each
 // maps a port sentinel at the activity boundary: a plain Go error reaches
@@ -108,10 +114,6 @@ type Activities struct {
 	// activity.RecordHeartbeat (the SDK test environment batches heartbeats,
 	// so counting real ones is not observable there).
 	heartbeat func(ctx context.Context)
-
-	// RunDeadlineMargin is how long before the activity deadline the agent
-	// is killed; zero means defaultRunDeadlineMargin. Tests shorten it.
-	RunDeadlineMargin time.Duration
 }
 
 func (a *Activities) beat(ctx context.Context) {
@@ -246,47 +248,48 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 	return AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model}, nil
 }
 
-// agentRunContext bounds the agent run to end a margin before the activity
-// deadline (see defaultRunDeadlineMargin). With no deadline it only adds
-// cancellation.
+// agentRunContext bounds the agent run to end runDeadlineMargin before the
+// activity deadline. With no deadline it only adds cancellation. If the
+// budget is smaller than the margin, the run context is already done: the
+// run is refused rather than started without time to shut down cleanly.
 func (a *Activities) agentRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	margin := a.RunDeadlineMargin
-	if margin <= 0 {
-		margin = defaultRunDeadlineMargin
+	return context.WithDeadline(ctx, deadline.Add(-a.runDeadlineMargin()))
+}
+
+// runDeadlineMargin derives the margin from the runner's shutdown bound.
+func (a *Activities) runDeadlineMargin() time.Duration {
+	bound := defaultShutdownBound
+	if b, ok := a.Agent.(ports.ShutdownBounder); ok {
+		bound = b.ShutdownBound()
 	}
-	if remaining := time.Until(deadline); margin > remaining/2 {
-		margin = remaining / 2
-	}
-	return context.WithDeadline(ctx, deadline.Add(-margin))
+	return bound + runReturnSlack
 }
 
 // ValidateAgentConfig checks an artifact job's agent config before any
 // workspace is prepared, so a bad config never costs a checkout or an
-// overlay. The format belongs to the adapter (ADR-0002): a runner that
-// cannot validate without running is trusted here and checked by RunAgent.
-// An artifact job must name a model (ADR-0006 §5, §7).
+// overlay. The format belongs to the adapter (ADR-0002), so the engine only
+// states the artifact job's requirement — a pinned model (ADR-0006 §5, §7)
+// — and the adapter enforces it. A runner that cannot validate without
+// running is trusted here and checked by RunAgent.
 func (a *Activities) ValidateAgentConfig(ctx context.Context, cfg json.RawMessage) error {
 	v, ok := a.Agent.(ports.AgentConfigValidator)
 	if !ok {
 		return nil
 	}
-	model, err := v.ValidateConfig(cfg)
-	if err == nil && model == "" {
-		err = fmt.Errorf("%w: an artifact job must name a model", ports.ErrInvalidAgentConfig)
-	}
-	if err != nil {
+	if err := v.ValidateConfig(cfg, ports.AgentConfigRequirements{RequireModel: true}); err != nil {
 		return asNonRetryable(err, nonRetryable{ports.ErrInvalidAgentConfig, errTypeInvalidAgentConfig})
 	}
 	return nil
 }
 
 // CheckoutInput identifies the pinned checkout an artifact job needs.
-// JobID, not a path: the git adapter never builds the workspace path — CheckoutWorkspace does, the same way Prepare does for
-// JobWorkflow, so both job shapes place workspaces under WorkspaceRoot
+// JobID, not a path: the git adapter never builds the workspace path —
+// CheckoutWorkspace does, the same way Prepare does for JobWorkflow, so
+// both job shapes place workspaces under WorkspaceRoot
 // identically. JobID is validated against the safe path-segment regex by
 // the workflow's validate() before this activity ever runs.
 type CheckoutInput struct {

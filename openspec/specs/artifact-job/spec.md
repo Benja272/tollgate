@@ -10,7 +10,7 @@ Defines the no-PR job shape that runs one headless agent turn over a pinned work
 
 The workflow MUST validate `SourceRef`, `agent_config`, `job_id`, and destination roots before any paid call, failing non-retryably on violation. `SourceRef` MUST be exactly 40 hexadecimal characters; both uppercase and lowercase hex digits are accepted and the value MUST be normalized to lowercase before use. Surrounding whitespace MUST be rejected, not trimmed. `agent_config` MUST be present and non-empty; an empty or `null` value fails validation. A destination root MUST NOT equal `.` after path cleaning and MUST NOT contain a `.git` path segment. `job_id` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; any value that does not match is unsafe and MUST be rejected.
 
-*(Added by the post-archive review.)* `Repo` MUST be an absolute path. `Prompt` MUST NOT be blank. `piece_id` MAY be omitted but MUST NOT be blank. `agent_timeout_minutes` MUST be between 0 and 1440; 0 means the 60-minute default. The adapter MUST parse `agent_config`, and it MUST name a model; this check is the job's first activity and MUST fail non-retryably before any checkout or overlay. Workflow code cannot parse the adapter's config format without breaking ADR-0002.
+*(Added by the post-archive review.)* `Repo` MUST be an absolute path. `Prompt` MUST NOT be blank. `piece_id` MAY be omitted but MUST NOT be blank. `agent_timeout_minutes` MUST be between 0 and 1440; 0 means the 60-minute default. The adapter MUST parse `agent_config` and MUST enforce the artifact job's requirement that it name a model; the engine passes the requirement and never parses the config. This check is the job's first activity and MUST fail non-retryably before any checkout or overlay. Workflow code cannot parse the adapter's config format without breaking ADR-0002.
 
 #### Scenario: Non-SHA source ref rejected
 
@@ -86,7 +86,7 @@ The workflow MUST validate `SourceRef`, `agent_config`, `job_id`, and destinatio
 
 ### Requirement: Permanent Failures Are Not Retried
 
-Checkout conflicts, invalid repositories, unresolvable refs, overlay boundary and source violations, and invalid agent configs MUST reach Temporal as non-retryable errors, and MUST be attempted once. The agent run's timeout for an artifact job MUST be configurable, and the agent MUST be stopped before the activity deadline so that a timed-out run is reported as unmetered rather than retried by the server. *(Added by the post-archive review, B6/B10.)*
+Checkout conflicts, invalid repositories, unresolvable refs, overlay boundary and source violations, and invalid agent configs MUST reach Temporal as non-retryable errors, and MUST be attempted once. The agent run's timeout for an artifact job MUST be configurable. The agent MUST be stopped before the activity deadline by a margin that covers the runner's whole shutdown path, so that a timed-out run is reported as unmetered rather than retried by the server. *(Added by the post-archive review, B6/B10.)*
 
 #### Scenario: Checkout conflict attempted once
 
