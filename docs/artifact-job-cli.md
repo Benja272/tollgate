@@ -45,6 +45,12 @@ for the full MUSTs):
 - `DestinationRoots` must contain at least one entry; every `Overlays[].Dest`
   must resolve inside one of them.
 - `Repo` must be an absolute local clone path — the git adapter never clones.
+- The commit at `SourceRef` must not track any path with a segment ending
+  in `.tollgate.tmp`, which is reserved for overlay temp files.
+
+The worker places workspaces under `TOLLGATE_WORKSPACE_ROOT` (an absolute
+path; default: the OS temp directory) and refuses to start with a relative
+one.
 
 **Verified against a live dev server** (2026-09-16, `temporal server
 start-dev`): the exact payload above (with a real repo/SHA/overlay source

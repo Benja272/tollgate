@@ -68,3 +68,78 @@ and failed for the stated reason, then the fix was applied.
   conflict.
 - `openspec/changes/artifact-jobs/verify-report.md` still exists outside the
   archive. It predates this review and was left untouched.
+
+## Second review round
+
+Date: 2026-09-17. A three-way re-review of `049ec2f..fabf977` returned
+**NOT OK**. Most findings were reproduced by the reviewers, either against
+Claude Code 2.1.274 with a fake local API or against a real Temporal server
+and Postgres. The fixes were made test-first again. Reviewed at `abf22b3`,
+where the only change was the orchestrator removing the stray pre-archive
+verify report.
+
+### Commits
+
+| Commit | Scope |
+|---|---|
+| `740fb31` | fix(ledger): key a cost row by the run that paid, not the run that writes it |
+| `72fee13` | fix(engine): bound the agent timeout before multiplying and refuse unrunnable budgets separately |
+| `d054980` | fix(claudecode): treat every run without one trustworthy cost report as unmetered |
+| `efc5f43` | fix(workspace): make retried directories durable and classify destination conflicts |
+| `8b2eacb` | fix(gitcli): reuse only an untouched worktree and keep transient failures retryable |
+| `7ea599b` | test(engine): capture ArtifactJobWorkflow replay fixtures as its determinism gate |
+| docs commit after these | ADR-0006 round-2 amendments, living specs, CLI doc, this section |
+
+### Blockers
+
+| # | Finding | Red test (failed before the fix) | Fix | Commit |
+|---|---|---|---|---|
+| R1 | A workflow reset between a paid activity and `RecordCosts` wrote the billed run again under the new run id: 1 run became 2 rows, $0.50 was recorded as $1.00, and the per-piece total inflated too. | `TestArtifactJobWorkflow_E2E_ResetAfterRunAgent_NoDoubleCount` (2 rows) and `TestJobWorkflow_E2E_ResetAfterRunAgentAndAfterJudge_NoDoubleCount` (4 and 3 rows), both on a real server with Postgres. Also the unit tests `TestRunAgent_ResultAndBilledDetailsCarryThePayingRunID`, `TestRecordCosts_UsesThePayingRunID_FallsBackToTheWritingRun` and `TestJudgeOne_JudgmentCarriesThePayingRunID`. | `RunAgent` and `JudgeOne` return `PaidByRunID`, in the result and in the billed details, and rows use it; the current run is only a fallback for legacy results. A reset after `RunAgent` in `JobWorkflow` correctly re-runs the judge, a second real charge, so that case expects 3 rows. | `740fb31` |
+| R2 | `time.Duration(AgentTimeoutMinutes) * time.Minute` wrapped before the bounds check (`1<<53` passed as 0, `1<<53+1` as 1 minute). | `TestArtifactJobWorkflow_InvalidInput_ReviewAdditions` (overflow cases passed validation); `TestArtifactJobWorkflow_AgentTimeout_UpperBoundAccepted` pins 1440. | Bounds are checked on the integer minutes. | `72fee13` |
+| R3 | Claude Code traps SIGTERM and SIGHUP and exits 143 or 129 without an envelope, which was classified as retryable. | `TestRunner_Run_ExitAbove128WithoutEnvelope_IsUnmetered` (129, 143, 255; 128 stays plain). | An exit above 128 without an envelope is unmetered. | `d054980` |
+| R4 | Exit 0 without a usable envelope was a retryable parse error; the old test locked that in. | `TestRunner_Run_NoUsableEnvelope_ExitZeroIsUnmeteredExitOneIsPlain` replaces `TestRunner_Run_NotAnEnvelope_Rejected`. | A clean exit without a usable envelope is unmetered. | `d054980` |
+| R5 | A forged result line after the real envelope was recorded, because the last envelope line won. That rule came from the orchestrator's first brief, and no test pinned the choice. | `TestRunner_Run_EnvelopeCount`: one, forged-after, forged-before, forged by an escaped child, and a cost-less result line next to a real one. | Exactly one result envelope is required. More than one is `ErrAmbiguousEnvelope`, logged and counted like unmetered, with type `AgentRunAmbiguousEnvelope`. | `d054980` |
+| R6 | Processes left by the agent survived `Run` unless it timed out. | `TestRunner_Run_LeftoverProcessesKilledOnEveryReturn` (non-zero exit with an envelope, clean exit, exit without an envelope); `TestConfigureProcess_SetsGroupAndParentDeathSignal`. Mutation-checked: removing the group kill fails both group-kill tests. | The group is killed on every return. On Linux this happens after the leader exits and before it is reaped (`waitid(WNOWAIT)`), so the group id cannot be reused, and `Pdeathsig=SIGKILL` is set with the starting thread locked. The reap-before-kill residual on other Unix systems is recorded in ADR-0006. | `d054980` |
+| R7 | Reuse accepted ignored files and edits hidden by assume-unchanged or skip-worktree. | `TestCheckout_ReuseRefusesHiddenModifications`. | Reuse requires `status --porcelain --ignored --untracked-files=all` to be empty and no lowercase or `S` tag in `ls-files -v`. | `8b2eacb` |
+| R8 | A directory created by a failed attempt was never made durable by the successful retry. | `TestApply_RetryAfterFailure_FsyncsParentsOfDirectoriesItDidNotCreate`. Mutation-checked. | The parent of every path component is queued for fsync, whether or not this call created it. | `efc5f43` |
+| R9 | A done context or a missing `git` binary was wrapped as the permanent `ErrInvalidRepo`. | `TestCheckout_TransientFailures_NotPermanentSentinels`. | `permanent()` keeps those failures plain and retryable. | `8b2eacb` |
+| R10 | A tracked `.f.tollgate.tmp` inside a root was silently deleted when the overlay wrote `f`. | `TestCheckout_TreeWithReservedSuffix_RefusedBeforeCheckout`; `TestActivities_CheckoutWorkspace_ReservedPath_NonRetryable`. | The suffix is reserved workspace-wide (`ports.ReservedPathSuffix`). The checkout refuses such a tree before creating any worktree (`ErrReservedPath`, `ReservedPathInTree`). | `8b2eacb` |
+| R11 | A workspace path that is itself a symlink to another job's worktree was reused. | `TestCheckout_WorkspacePathIsASymlink_Refused`. | The workspace path is checked with Lstat, and a symlink is a conflict. | `8b2eacb` |
+
+### Warnings
+
+| Warning | Resolution | Commit |
+|---|---|---|
+| A budget below the kill margin was reported as unmetered and counted. | New non-retryable `AgentRunBudgetTooShort`, not counted (`TestActivities_RunAgent_BudgetBelowMargin_RefusedNothingSpentNotCounted`). The runner's own "context done before start" path returns a plain not-started error (`TestRunner_Run_ContextDoneBeforeStart_NotStartedNotUnmetered`). The runner's `ctx.Err()` term is pinned by `TestRunner_Run_CancelledRunExitingOnItsOwn_IsUnmetered`, which uses a catchable cancel signal (mutation-checked). | `72fee13`, `d054980` |
+| Permanent overlay conflicts came back retryable. | `ErrDestinationConflict`, mapped to `OverlayDestinationConflict`, covering all five cases (`TestApply_DestinationConflicts_RejectedBeforeWriting`, plus an engine attempt-count case). | `efc5f43` |
+| `GOOS=windows go build ./...` failed. | Process control and overlay writing sit behind `unix` build tags, with stubs that fail with `errors.ErrUnsupported`, mapped to `UnsupportedPlatform`. | `d054980`, `efc5f43` |
+| Uncapped stdout. | 64 MiB cap; overflow is unmetered (`TestRunner_Run_StdoutOverCap_IsUnmetered`). | `d054980` |
+| The ledger accepted an empty RunID. | `ErrMissingRunID` (`TestLedger_RecordCosts_EmptyRunID_Rejected`). | `740fb31` |
+| Absolute WorkspaceRoot at startup; the `--` in `worktree add` was untested. | `Activities.Validate`, called by the worker (`TOLLGATE_WORKSPACE_ROOT`); the checkout refuses relative paths. `TestCheckout_WorktreeAddTerminatesOptionsBeforeThePath` records the real argv through a git wrapper. | `8b2eacb` |
+| The unmetered log fields were mutation-invisible. | `TestActivities_RunAgent_Unmetered_LogCarriesJobAndAttempt` asserts `job_id` and `attempt` through the Temporal test logger. | `72fee13` |
+| The retry-cap test compared against the constant itself. | It now asserts the literal 2. | `72fee13` |
+| Post-check source swaps, per-file fsync and cancellation between files were mutation-invisible. | `TestApply_SourceSwappedAfterPrecheck_Refused` (symlink, FIFO with a timeout), `TestApply_EveryFileFsyncedBeforeRename`, `TestApply_ContextCancelledBetweenFiles_StopsWriting`. The last one found a real ordering bug: the context is now checked after the per-file heartbeat. | `efc5f43` |
+| No GetVersion for the new first activity. | ADR-0006 §10 states why none is needed, since no worker ran the workflow before merge. Replay fixtures (success, billed) were captured after the last workflow change, and a mutation (reordering the first activity) fails the replay. | `7ea599b`, docs |
+
+### Follow-ups (not fixed in this change)
+
+- **Judge calls (`claudecode.CLIJudge`, PR shape only).** Reproduction, as
+  described by the reviewer:
+  - The judge CLI prints an envelope with `is_error: true`, or a valid
+    envelope whose `result` is not verdict JSON, or exits non-zero after
+    printing an envelope.
+  - `CLIJudge.Judge` returns a plain error. `JudgeOne` passes it to
+    Temporal as retryable, the judge is invoked again, and the first call's
+    spend is never recorded.
+  - The judge also runs with no process group, no `WaitDelay`, no
+    `cmd.Dir`, and the CLI's default tools.
+  - This predates the artifact-jobs change, and artifact jobs run no
+    judges. The judge's paid-run id (R1) is fixed; the rest belongs to a
+    judge-hardening change that mirrors the runner's classification.
+- **Group-kill PID reuse outside Linux.** On non-Linux Unix systems the
+  leader is reaped before its group is killed. Recorded in ADR-0006
+  Consequences.
+- **Migration 00004 index rebuild.** `CREATE UNIQUE INDEX` takes an
+  exclusive lock for the build. That is fine at the current size; a large
+  ledger needs a `CONCURRENTLY` migration. Recorded in ADR-0006
+  Consequences.

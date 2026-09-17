@@ -4,7 +4,9 @@ Date: 2026-09-16
 Status: proposed
 Amended: 2026-09-17, after the post-archive review
 (`openspec/changes/archive/2026-09-16-artifact-jobs/post-archive-review.md`).
-Amended text is marked *(amended)*.
+Amended text is marked *(amended)*. The second review round (same file,
+"Second review round") amended it again; that text is marked
+*(amended, round 2)*.
 
 ## Context
 
@@ -65,8 +67,12 @@ The existing code shapes the decision in four ways:
      removed. It gets the source's mode through its open handle just before
      the fsync. A leftover read-only temp file therefore cannot block a
      retry, and a symlink at the temporary name is replaced, never followed.
-   - *(amended)* Every directory the overlay creates is durable: its parent
-     is fsynced too, up to the first directory that already existed.
+   - *(amended, round 2)* Every directory on the path to a destination is
+     durable: the parent of every path component is fsynced, whether this
+     call created the component or an earlier, failed attempt did. The
+     first amendment queued only directories the current call created, so
+     a retry never made the failed attempt's directories durable. That was
+     reproduced.
    - Once the activity completes, every file is durable and complete. A
      retry rewrites everything and produces the same tree.
 
@@ -101,8 +107,31 @@ The existing code shapes the decision in four ways:
        execution vector);
      - a file overlay whose `Dest` equals a root.
 
-     Sources are opened with `O_NOFOLLOW`. Unreadable sources stay
+     Sources are opened with `O_NOFOLLOW|O_NONBLOCK` and must be regular
+     files, so a source swapped for a symlink or FIFO after the check is
+     refused rather than followed or blocked on. Unreadable sources stay
      retryable.
+   - *(amended, round 2)* A destination that can never be written is a
+     non-retryable `ErrDestinationConflict` (`OverlayDestinationConflict`),
+     found by the pre-check and, if the workspace changes shape afterwards,
+     by the write path (`ENOTDIR`, `EISDIR`, `ENAMETOOLONG`, `EEXIST`,
+     `ENOTEMPTY`). The cases are:
+     - a file overlay onto a directory;
+     - a path through a file;
+     - a file and a directory overlay at one path, or a path below a file
+       overlay;
+     - a name too long for its temporary name (255 bytes);
+     - a directory at a temporary name.
+   - *(amended, round 2)* The temporary-file suffix is reserved for the
+     whole workspace. The checkout refuses a pinned tree that tracks any
+     path with a segment ending in it (`ErrReservedPath`,
+     `ReservedPathInTree`), so a temp-suffixed file found in a workspace is
+     always a leftover of ours and safe to remove. Without this, a tracked
+     `.f.tollgate.tmp` was silently deleted when the overlay wrote `f`. That
+     was reproduced.
+   - *(amended, round 2)* Writing is behind a `unix` build tag. Elsewhere
+     the module builds and `Apply` fails with `errors.ErrUnsupported`
+     (`UnsupportedPlatform`).
    - Tollgate cannot tell which directories hold engine code. Declaring roots
      that leave the engine outside is the operator's responsibility.
 
@@ -230,7 +259,10 @@ The existing code shapes the decision in four ways:
        group kill is immediate. That makes the default margin 12 seconds.
      - A runner that states no bound gets 30 seconds.
      - If the activity budget is smaller than the margin, the run is
-       refused rather than started without time to shut down.
+       refused rather than started without time to shut down. *(amended,
+       round 2)* The refusal has its own non-retryable type,
+       `AgentRunBudgetTooShort`, and is not counted as unmetered, because
+       nothing ran.
      - A real-runner test pins the invariant with an escaped child
        process: it forces the full `WaitDelay`, and the activity must still
        return before its deadline.
@@ -238,13 +270,47 @@ The existing code shapes the decision in four ways:
      the whole group, and `WaitDelay` (10 seconds) bounds the wait for
      output pipes: a background process started by the agent's Bash tool
      inherits stdout. Before this amendment, such a process held the runner
-     open past a printed, billed envelope until the activity timed out. When
-     the wait delay expires after a clean exit, the leftover group is
-     killed and the captured stdout is still parsed.
-   - *(amended)* An envelope must have `type` `"result"` and a present
-     `total_cost_usd`. It is found in the whole output, or else in the last
-     JSON line among noise lines. Run errors carry a bounded (2 KiB) stderr
-     tail.
+     open past a printed, billed envelope until the activity timed out.
+   - *(amended, round 2)* The group is killed on **every** return from
+     `Run`, not only on timeout. Otherwise a watcher or dev server left by
+     the agent kept mutating the workspace after the run; that was
+     reproduced.
+     - On Linux the kill happens after the group leader exits but before it
+       is reaped (`waitid(WNOWAIT)`). A zombie leader keeps its pid, and so
+       the group id, from being reused, so the kill can only reach
+       processes the agent started.
+     - On other Unix systems the leader is already reaped when the group is
+       killed. The group id could in principle have been reused (see
+       Consequences).
+     - On Linux the CLI also gets `Pdeathsig=SIGKILL`, with its starting OS
+       thread locked until it is reaped, so it dies with the worker instead
+       of racing the server's retry in the same workspace.
+     - A process that escaped the group (`setsid`) can still hold stdout.
+       `WaitDelay` bounds that wait, and the captured stdout is still read.
+   - *(amended, round 2)* The failure classes, with no usable envelope:
+     - exit 0 (a clean exit without a cost report): **unmetered**;
+     - death by signal: **unmetered**;
+     - an exit status above 128: **unmetered**. Claude Code 2.1.274 traps
+       SIGTERM and SIGHUP and exits 143 or 129, which a systemd stop
+       triggers. That was reproduced;
+     - a context that ended while the run was live: **unmetered**;
+     - an exit of 1..128 on its own: plain and retryable;
+     - a CLI that never started (missing binary, context already done,
+       unsupported platform): plain and retryable, since nothing ran.
+   - *(amended, round 2)* stdout must hold **exactly one** result envelope
+     (a JSON object with `type` `"result"`): either the whole output, or a
+     single line among noise lines.
+     - Anything that inherited stdout can print a line. The first amendment
+       took the last envelope line, and a forged cost-0 line printed after
+       the real one was recorded as the run's cost; that was reproduced.
+     - More than one envelope is `ports.ErrAmbiguousEnvelope`, handled like
+       an unmetered run: logged, counted, non-retryable, with type
+       `AgentRunAmbiguousEnvelope`.
+     - One envelope without a numeric `total_cost_usd` is not usable.
+   - *(amended, round 2)* Captured stdout is capped at 64 MiB. Output past
+     the cap means something other than the CLI is writing, so the run is
+     unmetered.
+   - Run errors carry a bounded (2 KiB) stderr tail.
    - *(amended)* The billed error's details carry cost, usage and model,
      but not the agent's output, which could exceed Temporal's payload
      limit. The billed span records the same cost, usage and
@@ -276,6 +342,24 @@ The existing code shapes the decision in four ways:
      `run_id` is `NOT NULL DEFAULT ''`, because a NULL would never conflict.
      Migration 00004 was amended in place, since the branch was unmerged.
      Its Down refuses to collapse executions rather than delete spend.
+   - *(amended, round 2)* `run_id` is the run that **paid**, not the run
+     that writes the row.
+     - A workflow reset between a paid activity and `RecordCosts` makes the
+       new run re-issue the write. Keyed by the writing run, one billed run
+       became two rows ($0.50 recorded as $1.00, and the per-piece total
+       inflated the same way). That was reproduced against a real server
+       and Postgres.
+     - `RunAgent` and `JudgeOne` return
+       `activity.GetInfo(ctx).WorkflowExecution.RunID` as `PaidByRunID`, in
+       the result and in the billed-failure details. Rows use it, and fall
+       back to the current run only for results journaled before the field
+       existed.
+     - A reset *before* the paid activity re-runs the call. That is a second
+       real charge, and it correctly gets a row under the new run.
+     - The ledger rejects a new row with an empty `run_id`
+       (`ErrMissingRunID`); only legacy rows carry `''`.
+     - Real-server reset tests cover an artifact job reset after `RunAgent`,
+       and a `JobWorkflow` reset after `RunAgent` and after `JudgeOne`.
    - The cost of a piece is the sum over all of its jobs, whatever each job's
      outcome.
    - Knowing which pieces completed is the operator's concern, so the ledger
@@ -292,6 +376,18 @@ The existing code shapes the decision in four ways:
     | `ApplyOverlay` | `ErrOutsideRoots`, `ErrUnsupportedSource` | `OverlayOutsideRoots`, `OverlayUnsupportedSource` |
     | `ValidateAgentConfig`, `RunAgent` | `ErrInvalidAgentConfig` | `InvalidAgentConfig` |
     | `RunAgent` | `*RunError` / `*UnmeteredRunError` | `AgentRunBilled` / `AgentRunUnmetered` |
+    | `CheckoutWorkspace` *(round 2)* | `ErrReservedPath` | `ReservedPathInTree` |
+    | `ApplyOverlay` *(round 2)* | `ErrDestinationConflict` | `OverlayDestinationConflict` |
+    | `RunAgent` *(round 2)* | `*UnmeteredRunError` wrapping `ErrAmbiguousEnvelope` | `AgentRunAmbiguousEnvelope` |
+    | `RunAgent` *(round 2)* | budget below the kill margin (engine) | `AgentRunBudgetTooShort` |
+    | `RunAgent`, `ApplyOverlay` *(round 2)* | `errors.ErrUnsupported` | `UnsupportedPlatform` |
+    | workflow helper | a billed row that could not be written | `AgentRunBilledUnrecorded` |
+
+    *(amended, round 2)* Checkout wraps a git failure in its sentinel only
+    when the failure is permanent. A done context (worker shutdown, attempt
+    timeout) or a missing `git` binary stays a plain, retryable error;
+    before this amendment, a shutdown failed the job forever as
+    `InvalidRepo`.
 
     Tests assert the non-retryable flag and a single attempt through the
     Temporal test environment.
@@ -302,6 +398,24 @@ The existing code shapes the decision in four ways:
     agent run gets. A run cut off by the timeout is unmetered and never
     retried, so a default that is too short turns into lost, unrecorded
     spend. An hour covers a render with margin and still bounds a hung run.
+    *(amended, round 2)* The bounds are checked on the integer minutes
+    before multiplying. `time.Duration(m) * time.Minute` wraps: `1<<53`
+    passed as 0 (the default) and `1<<53+1` as one minute, which would kill
+    a render.
+
+    **No `workflow.GetVersion` for the new first activity** *(round 2)*.
+    Adding `ValidateAgentConfig` before `CheckoutWorkspace` changes the
+    command sequence. That is safe only because no worker ever ran
+    `ArtifactJobWorkflow` before this branch merged, so no history exists
+    to break. Replay fixtures for the success and billed-failure paths were
+    captured at the end of the review. From now on, a change that fails
+    `TestArtifactJobWorkflow_ReplaysCapturedHistories` needs
+    `workflow.GetVersion`, not a new capture.
+
+    **Worker startup** *(round 2)*. The worker requires an absolute
+    workspace root (`TOLLGATE_WORKSPACE_ROOT`, default: the OS temp
+    directory). The checkout also refuses a relative workspace path, and
+    `worktree add` receives the path after `--`.
     `JobWorkflow` keeps its 10-minute agent timeout. Its activity options
     are pinned by a test, because the replay test cannot see them.
 
@@ -357,6 +471,15 @@ The existing code shapes the decision in four ways:
   first (see the next item).
 - **Strict checkout reuse.** An existing checkout is reused only if it
   shares the object store, `HEAD` is at the SHA, and `git status` is clean.
+  *(amended, round 2)* "Clean" means all of the following:
+  - `git status --porcelain --ignored --untracked-files=all` is empty;
+  - `git ls-files -v` shows no assume-unchanged (lowercase tag) or
+    skip-worktree (`S`) entry.
+
+  Plain `git status` hides ignored files, and hides edits behind those index
+  flags. An edited, hidden engine file was reused as "clean at the SHA";
+  that was reproduced. The workspace path must not itself be a symlink: a
+  link to another job's worktree at the same SHA passed every other check.
   *(amended)* It must also be the root of a *linked* worktree: its resolved
   path must equal `rev-parse --show-toplevel`, and its git dir must differ
   from the common dir. Common dirs are compared after resolving symlinks.
@@ -382,4 +505,27 @@ The existing code shapes the decision in four ways:
   nothing counts it, and the retry can bill again. The bound is the retry
   cap, `runAgentMaxAttempts` (2). Closing this gap needs a record written
   before the agent starts (an intent row reconciled after the fact), which
-  is out of scope here.
+  is out of scope here. On Linux, `Pdeathsig` at least stops the orphaned
+  CLI from racing that retry in the same workspace.
+- **Group-kill residual outside Linux** *(round 2)*. Without
+  `waitid(WNOWAIT)` the leader is reaped before its group is killed, so
+  that kill could in principle reach a new process group that reused the
+  id. On Linux the kill happens while the leader is an unreaped zombie, so
+  the id cannot be reused.
+- **Migration 00004 locks the table while it rebuilds the natural key**
+  *(round 2)*. `CREATE UNIQUE INDEX` without `CONCURRENTLY` takes an
+  exclusive lock for the duration of the build. That is fine at the
+  ledger's current size. A large ledger would need
+  `CREATE UNIQUE INDEX CONCURRENTLY` in its own non-transactional
+  migration.
+- **Judge calls are not hardened (follow-up)** *(round 2)*. These defects
+  predate this change and affect the PR shape only, since artifact jobs run
+  no judges:
+  - `claudecode.CLIJudge` drops billed failures and lets them retry: an
+    envelope with `is_error`, an invalid verdict JSON after a billed call,
+    or a non-zero exit after an envelope.
+  - It runs with no process group, no `WaitDelay`, no working directory,
+    and the CLI's default tools.
+
+  Its paid-run id is in scope and fixed (§9). The rest is recorded as a
+  follow-up in the post-archive review.

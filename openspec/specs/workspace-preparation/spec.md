@@ -24,9 +24,21 @@ For an artifact job, the workspace MUST be a git worktree of `Repo` checked out 
 
 #### Scenario: Conflicting path fails non-retryably
 
-- GIVEN an existing path at the workspace location that is not the root of a clean, linked worktree of `Repo` at `SourceRef` (compared after resolving symlinks; a subdirectory of such a worktree, or the repository's main worktree, is a conflict)
+- GIVEN an existing path at the workspace location that is not the root of a clean, linked worktree of `Repo` at `SourceRef` (compared after resolving symlinks; a subdirectory of such a worktree, or the repository's main worktree, is a conflict). The path itself MUST NOT be a symlink. "Clean" excludes ignored and untracked files and any assume-unchanged or skip-worktree index entry. *(Second round: R7, R11.)*
 - WHEN checkout runs
 - THEN it fails non-retryably
+
+#### Scenario: Transient checkout failures stay retryable
+
+- GIVEN a checkout whose context is done, or a worker with no `git` binary
+- WHEN checkout fails
+- THEN the failure is not reported as an invalid repository, unknown ref or conflict, and stays retryable *(Second round: R9.)*
+
+#### Scenario: Pinned tree using the reserved temp suffix refused
+
+- GIVEN a commit that tracks a path with a segment ending in `.tollgate.tmp`
+- WHEN checkout runs
+- THEN it fails non-retryably before any worktree is created *(Second round: R10.)*
 
 #### Scenario: Checkout runs no repository hooks
 
@@ -38,7 +50,7 @@ For an artifact job, the workspace MUST be a git worktree of `Repo` checked out 
 
 The overlay MUST place files atomically, inside the declared destination roots only, as its own activity. The overlay MUST reject any symlink found anywhere inside an overlay source before writing any file.
 
-*(Made more precise by the post-archive review, B1-B4.)* Before any write, the overlay MUST check every future destination path component, including each file's temporary name, and reject an existing symlink on any of them. Writes MUST NOT follow a symlink even if one appears after that check. The overlay MUST reject source entries that are not regular files or directories, that end in the temporary-file suffix, or that contain a `.git` segment in any letter case, and destination paths with either reserved name. A file overlay whose destination equals a declared root MUST be rejected. Every directory the overlay creates MUST be durable: its parent is fsynced. A leftover temporary file of any mode MUST NOT block a retry.
+*(Made more precise by the post-archive review, B1-B4.)* Before any write, the overlay MUST check every future destination path component, including each file's temporary name, and reject an existing symlink on any of them. Writes MUST NOT follow a symlink even if one appears after that check. The overlay MUST reject source entries that are not regular files or directories, that end in the temporary-file suffix, or that contain a `.git` segment in any letter case, and destination paths with either reserved name. A file overlay whose destination equals a declared root MUST be rejected. Every directory on the path to a destination MUST be durable: its parent is fsynced, whether this attempt or an earlier, failed one created it *(second round, R8)*. A destination that can never be written (a file onto a directory, a path through a file, a file/directory collision, a name too long for its temporary name, a directory at a temporary name) MUST fail non-retryably before anything is written. A leftover temporary file of any mode MUST NOT block a retry.
 
 #### Scenario: Retry leaves no partial file
 

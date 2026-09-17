@@ -55,3 +55,13 @@ With an empty `AgentConfig`, the adapter MUST build the minimal command: the sam
 - GIVEN an empty `AgentConfig`
 - WHEN the adapter builds the CLI command
 - THEN the arguments are exactly `-p --output-format json -- <prompt>`
+
+### Requirement: Harness Processes Do Not Outlive the Run
+
+The adapter MUST kill every process the harness started when the run returns, for any outcome. Where the platform allows it, the adapter MUST do this before the harness's own process is reaped, and MUST make the harness die with the worker. *(Second round: R6.)*
+
+#### Scenario: A background process left by the agent is killed
+
+- GIVEN an agent run that leaves a background process, and that exits cleanly, fails, or reports no cost
+- WHEN the run returns
+- THEN that process is no longer running
