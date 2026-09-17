@@ -53,6 +53,9 @@ func TestArtifactJobWorkflow_Order_ChecksOutOverlaysRunsAgentRecordsCost(t *test
 	}
 
 	var acts *Activities
+	env.OnActivity(acts.ValidateAgentConfig, mock.Anything, mock.Anything).
+		Run(record("validate_config")).
+		Return(nil)
 	env.OnActivity(acts.CheckoutWorkspace, mock.Anything, mock.Anything).
 		Run(record("checkout")).
 		Return(Workspace{Path: "/tmp/artifact-1"}, nil)
@@ -85,7 +88,7 @@ func TestArtifactJobWorkflow_Order_ChecksOutOverlaysRunsAgentRecordsCost(t *test
 	require.InDelta(t, 3.5, result.CostUSD, 1e-9)
 	require.Equal(t, "planned", result.Output)
 
-	require.Equal(t, []string{"checkout", "overlay", "run_agent", "record_cost"}, order)
+	require.Equal(t, []string{"validate_config", "checkout", "overlay", "run_agent", "record_cost"}, order)
 	require.Len(t, recorded, 1)
 	require.Equal(t, "piece-42", recorded[0].PieceID)
 
@@ -131,6 +134,7 @@ func TestArtifactJobWorkflow_InvalidInput_TableDriven(t *testing.T) {
 			require.True(t, env.IsWorkflowCompleted())
 			requireInvalidInput(t, env.GetWorkflowError())
 
+			env.AssertNotCalled(t, "ValidateAgentConfig", mock.Anything, mock.Anything)
 			env.AssertNotCalled(t, "CheckoutWorkspace", mock.Anything, mock.Anything)
 			env.AssertNotCalled(t, "ApplyOverlay", mock.Anything, mock.Anything)
 			env.AssertNotCalled(t, "RunAgent", mock.Anything, mock.Anything)
@@ -147,6 +151,7 @@ func TestArtifactJobWorkflow_UppercaseSHA_ReachesCheckoutLowercased(t *testing.T
 	in.SourceRef = strings.ToUpper(in.SourceRef)
 
 	var acts *Activities
+	env.OnActivity(acts.ValidateAgentConfig, mock.Anything, mock.Anything).Return(nil)
 	var gotSourceRef string
 	env.OnActivity(acts.CheckoutWorkspace, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
@@ -169,6 +174,7 @@ func TestArtifactJobWorkflow_AgentRunBilled_RecordsRowThenFails(t *testing.T) {
 	env := ts.NewTestWorkflowEnvironment()
 
 	var acts *Activities
+	env.OnActivity(acts.ValidateAgentConfig, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(acts.CheckoutWorkspace, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/artifact-3"}, nil)
 	env.OnActivity(acts.ApplyOverlay, mock.Anything, mock.Anything).Return(nil)
 
@@ -198,6 +204,7 @@ func TestArtifactJobWorkflow_OverlayFailure_AgentNeverInvokedNoRunAgentRow(t *te
 	env := ts.NewTestWorkflowEnvironment()
 
 	var acts *Activities
+	env.OnActivity(acts.ValidateAgentConfig, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(acts.CheckoutWorkspace, mock.Anything, mock.Anything).Return(Workspace{Path: "/tmp/artifact-4"}, nil)
 	env.OnActivity(acts.ApplyOverlay, mock.Anything, mock.Anything).
 		Return(errors.New("overlay: symlink rejected"))

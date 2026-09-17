@@ -82,13 +82,14 @@ func e2eFakeClaude(t *testing.T, envelope string) string {
 }
 
 // e2eWorker starts a worker that registers ArtifactJobWorkflow and ONLY the
-// four activity methods it actually calls — never the whole *Activities
+// five activity methods it actually calls — never the whole *Activities
 // struct — so an accidental Ship/JudgeOne call fails loudly (no such
 // activity registered) instead of silently running the real scaffolding.
 func e2eWorker(t *testing.T, c client.Client, taskQueue string, acts *Activities) worker.Worker {
 	t.Helper()
 	w := worker.New(c, taskQueue, worker.Options{WorkerStopTimeout: time.Second})
 	w.RegisterWorkflow(ArtifactJobWorkflow)
+	w.RegisterActivity(acts.ValidateAgentConfig)
 	w.RegisterActivity(acts.CheckoutWorkspace)
 	w.RegisterActivity(acts.ApplyOverlay)
 	w.RegisterActivity(acts.RunAgent)

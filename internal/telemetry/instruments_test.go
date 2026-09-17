@@ -191,6 +191,59 @@ func TestInstruments_FailedCallMarksSpanErrorAndRecordsNoCost(t *testing.T) {
 	require.Zero(t, cost, "a failed call has no reported cost to bill")
 }
 
+// A billed failure reported a cost: the span and the cost metric must carry
+// it, or telemetry and the ledger disagree on exactly this path (review B9).
+func TestRecording_End_BilledError_RecordsCostUsageModelAndMarksError(t *testing.T) {
+	h := newHarness(t)
+
+	_, rec := h.inst.StartInvokeAgent(context.Background(), telemetry.Call{
+		JobID: "job-8", Phase: "run_agent", Actor: "agent", AgentName: "coding-agent",
+	})
+	billed := ports.RunResult{CostUSD: 0.9, Model: "claude-haiku-4-5", Usage: ports.TokenUsage{InputTokens: 12, OutputTokens: 3}}
+	rec.End(context.Background(),
+		telemetry.Result{CostUSD: billed.CostUSD, Usage: billed.Usage, Model: billed.Model},
+		&ports.RunError{Result: billed, Err: errors.New("is_error=true")})
+
+	ended := h.spans.Ended()
+	require.Len(t, ended, 1)
+	require.Equal(t, "Error", ended[0].Status().Code.String())
+	got := attrs(t, ended[0])
+	require.Equal(t, "claude-haiku-4-5", got["gen_ai.response.model"].AsString())
+	require.InDelta(t, 0.9, got["tollgate.cost.usd"].AsFloat64(), 1e-9)
+	require.Equal(t, int64(12), got["gen_ai.usage.input_tokens"].AsInt64())
+
+	cost, _ := sumFor(t, h.collect(t), telemetry.MetricCostUSD)
+	require.InDelta(t, 0.9, cost, 1e-9, "the billed failure's cost must reach the cost metric")
+}
+
+func TestInstruments_RecordUnmeteredRun_CountsPerActorAndPhase(t *testing.T) {
+	h := newHarness(t)
+	call := telemetry.Call{JobID: "job-8", Phase: "run_agent", Actor: "agent"}
+
+	h.inst.RecordUnmeteredRun(context.Background(), call)
+	h.inst.RecordUnmeteredRun(context.Background(), call)
+
+	var total int64
+	for _, sm := range h.collect(t).ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != telemetry.MetricUnmeteredRuns {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+				actor, _ := dp.Attributes.Value("tollgate.actor")
+				require.Equal(t, "agent", actor.AsString())
+			}
+		}
+	}
+	require.Equal(t, int64(2), total)
+
+	var nilInst *telemetry.Instruments
+	require.NotPanics(t, func() { nilInst.RecordUnmeteredRun(context.Background(), call) })
+}
+
 func TestRecording_End_SetsGenAIResponseModelWhenPresent(t *testing.T) {
 	h := newHarness(t)
 
