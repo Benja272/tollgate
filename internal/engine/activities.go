@@ -46,6 +46,7 @@ const (
 	errTypeCheckoutConflict           = "CheckoutConflict"
 	errTypeInvalidRepo                = "InvalidRepo"
 	errTypeRefNotFound                = "RefNotFound"
+	errTypeReservedPath               = "ReservedPathInTree"
 	errTypeOverlayOutsideRoots        = "OverlayOutsideRoots"
 	errTypeOverlayUnsupportedSource   = "OverlayUnsupportedSource"
 	errTypeOverlayDestinationConflict = "OverlayDestinationConflict"
@@ -341,6 +342,7 @@ func (a *Activities) CheckoutWorkspace(ctx context.Context, in CheckoutInput) (W
 			nonRetryable{ports.ErrCheckoutConflict, errTypeCheckoutConflict},
 			nonRetryable{ports.ErrInvalidRepo, errTypeInvalidRepo},
 			nonRetryable{ports.ErrRefNotFound, errTypeRefNotFound},
+			nonRetryable{ports.ErrReservedPath, errTypeReservedPath},
 		)
 	}
 	return Workspace{Path: path}, nil
@@ -479,4 +481,14 @@ func (a *Activities) heartbeatInterval() time.Duration {
 		return a.HeartbeatInterval
 	}
 	return defaultHeartbeatInterval
+}
+
+// Validate checks the wiring a worker starts with. WorkspaceRoot must be
+// absolute: workspace paths are built from it and handed to git, where a
+// relative path could even read as an option.
+func (a *Activities) Validate() error {
+	if root := a.workspaceRoot(); !filepath.IsAbs(root) {
+		return fmt.Errorf("engine: workspace root %q must be an absolute path", root)
+	}
+	return nil
 }

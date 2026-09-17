@@ -965,3 +965,22 @@ func TestActivities_RunAgent_AmbiguousEnvelope_CountedLikeUnmetered(t *testing.T
 	requireNonRetryableType(t, err, errTypeAgentRunAmbiguousEnvelope)
 	require.Equal(t, int64(1), int64Sum(t, tel, "tollgate.agent.unmetered_runs"))
 }
+
+func TestActivities_Validate_RequiresAbsoluteWorkspaceRoot(t *testing.T) {
+	require.NoError(t, (&Activities{}).Validate(), "the OS temp directory is the default")
+	require.NoError(t, (&Activities{WorkspaceRoot: "/srv/tollgate"}).Validate())
+	for _, root := range []string{"relative", "-flag", "./ws"} {
+		require.Error(t, (&Activities{WorkspaceRoot: root}).Validate(), root)
+	}
+}
+
+func TestActivities_CheckoutWorkspace_ReservedPath_NonRetryable(t *testing.T) {
+	checkout := &countingCheckout{err: fmt.Errorf("tree holds x.tollgate.tmp: %w", ports.ErrReservedPath)}
+	acts := &Activities{Agent: &validatingRunner{model: "haiku"}, Checkout: checkout, Ledger: &memLedger{}, WorkspaceRoot: t.TempDir()}
+	env, starts := realActivitiesEnv(t, acts)
+
+	env.ExecuteWorkflow(ArtifactJobWorkflow, validArtifactInput())
+
+	requireNonRetryableType(t, env.GetWorkflowError(), errTypeReservedPath)
+	require.Equal(t, 1, starts.count("CheckoutWorkspace"))
+}

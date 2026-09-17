@@ -208,3 +208,153 @@ func TestCheckout_ReuseThroughSymlinkedPaths(t *testing.T) {
 	require.NoError(t, c.Checkout(context.Background(), repoLink, sha2, ws), "a retry must reuse the worktree")
 	require.NoError(t, c.Checkout(context.Background(), repo, sha2, ws), "the resolved repo path is the same repo")
 }
+
+// commitIn adds a commit to repo with the given files and returns its SHA.
+func commitIn(t *testing.T, repo string, files map[string]string) string {
+	t.Helper()
+	for rel, content := range files {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(repo, rel)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, rel), []byte(content), 0o644))
+	}
+	run := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "more")
+	return run("rev-parse", "HEAD")
+}
+
+// A reused worktree must be exactly the pinned tree: git status hides
+// ignored files and edits behind assume-unchanged or skip-worktree
+// (review R7, reproduced with an edited, hidden file.txt).
+func TestCheckout_ReuseRefusesHiddenModifications(t *testing.T) {
+	cases := map[string]func(t *testing.T, repo, ws string){
+		"ignored file": func(t *testing.T, repo, ws string) {
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte("*.local\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(ws, "engine.local"), []byte("x"), 0o644))
+		},
+		"untracked file in a new directory": func(t *testing.T, repo, ws string) {
+			require.NoError(t, os.MkdirAll(filepath.Join(ws, "new", "deep"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(ws, "new", "deep", "f"), []byte("x"), 0o644))
+		},
+		"edit hidden by assume-unchanged": func(t *testing.T, repo, ws string) {
+			gitOutput(t, ws, "update-index", "--assume-unchanged", "file.txt")
+			require.NoError(t, os.WriteFile(filepath.Join(ws, "file.txt"), []byte("engine edited"), 0o644))
+		},
+		"edit hidden by skip-worktree": func(t *testing.T, repo, ws string) {
+			gitOutput(t, ws, "update-index", "--skip-worktree", "file.txt")
+			require.NoError(t, os.WriteFile(filepath.Join(ws, "file.txt"), []byte("engine edited"), 0o644))
+		},
+		"assume-unchanged flag without an edit": func(t *testing.T, repo, ws string) {
+			gitOutput(t, ws, "update-index", "--assume-unchanged", "file.txt")
+		},
+	}
+	for name, hide := range cases {
+		t.Run(name, func(t *testing.T) {
+			repo, _, sha2 := setupRepo(t)
+			ws := filepath.Join(t.TempDir(), "ws")
+			c := Checkout{}
+			require.NoError(t, c.Checkout(context.Background(), repo, sha2, ws))
+			require.Empty(t, gitOutput(t, ws, "status", "--porcelain"), "precondition: plain status looks clean")
+			hide(t, repo, ws)
+
+			err := c.Checkout(context.Background(), repo, sha2, ws)
+			require.ErrorIs(t, err, ports.ErrCheckoutConflict)
+		})
+	}
+}
+
+// A cancelled context or a missing git binary is not an invalid repo: it
+// must stay retryable (review R9, reproduced).
+func TestCheckout_TransientFailures_NotPermanentSentinels(t *testing.T) {
+	permanent := []error{ports.ErrInvalidRepo, ports.ErrRefNotFound, ports.ErrCheckoutConflict, ports.ErrReservedPath}
+	requireTransient := func(t *testing.T, err error) {
+		t.Helper()
+		require.Error(t, err)
+		for _, sentinel := range permanent {
+			require.NotErrorIs(t, err, sentinel)
+		}
+	}
+
+	t.Run("cancelled context", func(t *testing.T) {
+		repo, _, sha2 := setupRepo(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := Checkout{}.Checkout(ctx, repo, sha2, filepath.Join(t.TempDir(), "ws"))
+		requireTransient(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+	t.Run("cancelled context on reuse", func(t *testing.T) {
+		repo, _, sha2 := setupRepo(t)
+		ws := filepath.Join(t.TempDir(), "ws")
+		require.NoError(t, Checkout{}.Checkout(context.Background(), repo, sha2, ws))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		requireTransient(t, Checkout{}.Checkout(ctx, repo, sha2, ws))
+	})
+	t.Run("git binary missing", func(t *testing.T) {
+		repo, _, sha2 := setupRepo(t)
+		t.Setenv("PATH", t.TempDir())
+		err := Checkout{}.Checkout(context.Background(), repo, sha2, filepath.Join(t.TempDir(), "ws"))
+		requireTransient(t, err)
+		require.ErrorIs(t, err, exec.ErrNotFound)
+	})
+}
+
+// The temp-file suffix is reserved for the whole workspace, so a pinned
+// tree holding such a path is refused before any worktree exists (review
+// R10: the overlay would otherwise delete a tracked .f.tollgate.tmp).
+func TestCheckout_TreeWithReservedSuffix_RefusedBeforeCheckout(t *testing.T) {
+	for _, rel := range []string{"output/.f" + ports.ReservedPathSuffix, "dir" + ports.ReservedPathSuffix + "/f"} {
+		t.Run(rel, func(t *testing.T) {
+			repo, _, _ := setupRepo(t)
+			sha := commitIn(t, repo, map[string]string{rel: "tracked"})
+			ws := filepath.Join(t.TempDir(), "ws")
+
+			err := Checkout{}.Checkout(context.Background(), repo, sha, ws)
+
+			require.ErrorIs(t, err, ports.ErrReservedPath)
+			_, statErr := os.Lstat(ws)
+			require.True(t, os.IsNotExist(statErr), "no worktree may be created")
+		})
+	}
+}
+
+// A workspace path that is itself a symlink — even to a matching worktree —
+// would send the overlay into another job's workspace (review R11).
+func TestCheckout_WorkspacePathIsASymlink_Refused(t *testing.T) {
+	repo, _, sha2 := setupRepo(t)
+	other := filepath.Join(t.TempDir(), "other-job")
+	require.NoError(t, Checkout{}.Checkout(context.Background(), repo, sha2, other))
+	ws := filepath.Join(t.TempDir(), "ws")
+	require.NoError(t, os.Symlink(other, ws))
+
+	err := Checkout{}.Checkout(context.Background(), repo, sha2, ws)
+
+	require.ErrorIs(t, err, ports.ErrCheckoutConflict)
+}
+
+// The workspace path follows a "--" in `worktree add`. Paths are always
+// absolute today, so the terminator is pinned on the argv itself.
+func TestCheckout_WorktreeAddTerminatesOptionsBeforeThePath(t *testing.T) {
+	repo, _, sha2 := setupRepo(t)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "args")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logFile + "\nexec " + realGit + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0o755))
+	t.Setenv("PATH", bin)
+	ws := filepath.Join(t.TempDir(), "ws")
+
+	require.NoError(t, Checkout{}.Checkout(context.Background(), repo, sha2, ws))
+
+	raw, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "worktree add --detach -- "+ws+" "+sha2)
+}
