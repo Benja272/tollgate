@@ -13,6 +13,12 @@ type Checkout interface {
 	Checkout(ctx context.Context, repo, sha, path string) error
 }
 
+// ReservedPathSuffix marks the overlay's durable-write temp files. It is
+// reserved for the whole workspace: a pinned tree holding a path that ends
+// in it is refused, so a temp-suffixed file in a workspace is always a
+// leftover of an interrupted overlay.
+const ReservedPathSuffix = ".tollgate.tmp"
+
 // Sentinels a Checkout implementation returns. All three are non-retryable:
 // retrying cannot fix an invalid repo, an unresolvable ref, or a workspace
 // path that conflicts with the requested commit.

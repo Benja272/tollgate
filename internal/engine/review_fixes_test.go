@@ -237,6 +237,16 @@ func TestArtifactJobWorkflow_OverlaySentinels_NonRetryableSingleAttempt(t *testi
 			},
 		},
 		{
+			name:     "file overlay onto an existing directory",
+			wantType: errTypeOverlayDestinationConflict,
+			prepare: func(t *testing.T, ws string, in *ArtifactJobInput) {
+				require.NoError(t, os.MkdirAll(filepath.Join(ws, "output", "x"), 0o755))
+				src := filepath.Join(t.TempDir(), "x")
+				require.NoError(t, os.WriteFile(src, []byte("x"), 0o644))
+				in.Overlays = []workspace.Overlay{{Source: src, Dest: "output/x"}}
+			},
+		},
+		{
 			name:     "symlinked root",
 			wantType: errTypeOverlayOutsideRoots,
 			prepare: func(t *testing.T, ws string, in *ArtifactJobInput) {

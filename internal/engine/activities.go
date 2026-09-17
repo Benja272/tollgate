@@ -43,12 +43,13 @@ const (
 // maps a port sentinel at the activity boundary: a plain Go error reaches
 // Temporal as retryable, whatever its documentation says.
 const (
-	errTypeCheckoutConflict         = "CheckoutConflict"
-	errTypeInvalidRepo              = "InvalidRepo"
-	errTypeRefNotFound              = "RefNotFound"
-	errTypeOverlayOutsideRoots      = "OverlayOutsideRoots"
-	errTypeOverlayUnsupportedSource = "OverlayUnsupportedSource"
-	errTypeInvalidAgentConfig       = "InvalidAgentConfig"
+	errTypeCheckoutConflict           = "CheckoutConflict"
+	errTypeInvalidRepo                = "InvalidRepo"
+	errTypeRefNotFound                = "RefNotFound"
+	errTypeOverlayOutsideRoots        = "OverlayOutsideRoots"
+	errTypeOverlayUnsupportedSource   = "OverlayUnsupportedSource"
+	errTypeOverlayDestinationConflict = "OverlayDestinationConflict"
+	errTypeInvalidAgentConfig         = "InvalidAgentConfig"
 	// errTypeAgentRunUnmetered marks a run killed before it reported its
 	// cost (ADR-0006 §8): it may have billed an unknown amount, so it is
 	// never retried automatically.
@@ -368,6 +369,8 @@ func (a *Activities) ApplyOverlay(ctx context.Context, in OverlayInput) error {
 	return asNonRetryable(err,
 		nonRetryable{workspace.ErrOutsideRoots, errTypeOverlayOutsideRoots},
 		nonRetryable{workspace.ErrUnsupportedSource, errTypeOverlayUnsupportedSource},
+		nonRetryable{workspace.ErrDestinationConflict, errTypeOverlayDestinationConflict},
+		nonRetryable{errors.ErrUnsupported, errTypeUnsupportedPlatform},
 	)
 }
 

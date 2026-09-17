@@ -5,21 +5,20 @@
 // Writes go through directory file descriptors opened one component at a
 // time with O_NOFOLLOW, so a symlink anywhere below the workspace — tracked
 // at the pinned commit or planted after the pre-check — can never redirect a
-// write. The package therefore needs a Unix *at(2) syscall family.
+// write. Writing therefore needs the Unix *at(2) syscall family; elsewhere
+// Apply fails with errors.ErrUnsupported.
 package workspace
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"golang.org/x/sys/unix"
+	"github.com/Benja272/tollgate/internal/ports"
 )
 
 // Overlay places the file or directory tree at Source (absolute, outside
@@ -43,19 +42,33 @@ var (
 	// socket, or fifo), or contains a name the overlay reserves: a ".git"
 	// segment in any letter case, or the temp-file suffix.
 	ErrUnsupportedSource = errors.New("workspace: source is missing or not a plain file/directory")
+	// ErrDestinationConflict means the workspace, or the overlay set
+	// itself, holds something where an overlay needs a different kind of
+	// entry: a directory where a file goes, a file on a directory's path, a
+	// file and a directory at one path, or a name too long for its temp
+	// name. Retrying cannot fix it.
+	ErrDestinationConflict = errors.New("workspace: destination conflicts with an existing or planned entry")
 )
 
+// maxNameBytes is the longest file name the overlay writes (NAME_MAX on the
+// filesystems tollgate targets); the temp name is the longest one it needs.
+const maxNameBytes = 255
+
 // tmpSuffix marks a durable-write temp file so a crash mid-copy is
-// recognizable. No source entry or destination may end in it, so a temp
-// name can never collide with real content.
-const tmpSuffix = ".tollgate.tmp"
+// recognizable. It is reserved for the whole workspace: no source entry or
+// destination may end in it, and the checkout refuses a pinned tree that
+// holds such a path, so any temp-suffixed name found in a workspace is a
+// leftover of an earlier attempt and safe to remove.
+const tmpSuffix = ports.ReservedPathSuffix
 
 // Test seams. afterPrecheckHook runs between the pre-check and the first
-// write, so tests can plant what a concurrent writer could. syncedDirHook
-// observes every directory fsync, by workspace-relative path.
+// write, so tests can plant what a concurrent writer could. The other hooks
+// observe fsyncs and renames by workspace-relative path.
 var (
 	afterPrecheckHook func()
 	syncedDirHook     func(rel string)
+	syncedFileHook    func(rel string)
+	renamedFileHook   func(rel string)
 )
 
 // ValidatePaths is the pure path-validation half of ADR-0006 §4: every
@@ -165,8 +178,9 @@ type plan struct {
 // Each file is written durably (ADR-0006 §3): to a "<dir>/.<base>.tollgate.tmp"
 // sibling created writable, filled, given the source's mode, fsynced, then
 // renamed over the final name. After all files are placed, every directory
-// that received a rename and the parent of every directory this call
-// created are fsynced. A retry after a partial failure is safe: it
+// that received a rename, and the parent of every directory on the path to
+// any destination — created by this call or by an earlier, failed one — are
+// fsynced. A retry after a partial failure is safe: it
 // overwrites the same files by the same sequence, and a leftover temp file,
 // whatever its mode, is removed first.
 //
@@ -196,11 +210,11 @@ func Apply(ctx context.Context, workspace string, roots []string, ovs []Overlay,
 		}
 	}
 	for _, f := range p.files {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		if beat != nil {
 			beat()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := w.writeFile(f); err != nil {
 			return err
@@ -242,20 +256,58 @@ func precheck(workspace string, roots []string, ovs []Overlay) (plan, error) {
 		}
 	}
 
+	if err := checkPlanConsistent(p); err != nil {
+		return plan{}, err
+	}
 	for _, d := range p.dirs {
-		if err := checkNoSymlink(workspace, d); err != nil {
+		if err := checkExisting(workspace, d, kindDir); err != nil {
 			return plan{}, err
 		}
 	}
 	for _, f := range p.files {
-		if err := checkNoSymlink(workspace, f.dest); err != nil {
+		if err := checkExisting(workspace, f.dest, kindFile); err != nil {
 			return plan{}, err
 		}
-		if err := checkNoSymlink(workspace, tempRel(f.dest)); err != nil {
+		if err := checkExisting(workspace, tempRel(f.dest), kindTemp); err != nil {
 			return plan{}, err
 		}
 	}
 	return p, nil
+}
+
+// checkPlanConsistent rejects an overlay set that asks for a file and a
+// directory at one path, or for a path below a file, and a file whose temp
+// name would be too long.
+func checkPlanConsistent(p plan) error {
+	files := make(map[string]bool, len(p.files))
+	for _, f := range p.files {
+		files[f.dest] = true
+		if len("."+filepath.Base(f.dest)+tmpSuffix) > maxNameBytes {
+			return fmt.Errorf("%w: %s is too long for its temporary name", ErrDestinationConflict, f.dest)
+		}
+	}
+	belowAFile := func(rel string) error {
+		for dir := filepath.Dir(rel); dir != "."; dir = filepath.Dir(dir) {
+			if files[dir] {
+				return fmt.Errorf("%w: %s lies below the file overlay %s", ErrDestinationConflict, rel, dir)
+			}
+		}
+		return nil
+	}
+	for _, d := range p.dirs {
+		if files[d] {
+			return fmt.Errorf("%w: %s is both a file and a directory overlay", ErrDestinationConflict, d)
+		}
+		if err := belowAFile(d); err != nil {
+			return err
+		}
+	}
+	for _, f := range p.files {
+		if err := belowAFile(f.dest); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // planTree adds one source directory tree to p, rejecting anything that is
@@ -298,12 +350,24 @@ func tempRel(dest string) string {
 	return filepath.Join(filepath.Dir(dest), "."+filepath.Base(dest)+tmpSuffix)
 }
 
-// checkNoSymlink Lstats every existing component of workspace/rel, from the
-// workspace down, and rejects the first symlink. Once a component is
-// missing, nothing below it can exist.
-func checkNoSymlink(workspace, rel string) error {
+// entryKind is what an overlay needs at a destination path.
+type entryKind int
+
+const (
+	kindDir  entryKind = iota // a directory, created if missing
+	kindFile                  // a regular file, replaced if present
+	kindTemp                  // a temp name: absent, or a leftover regular file
+)
+
+// checkExisting Lstats every existing component of workspace/rel, from the
+// workspace down. A symlink anywhere is ErrOutsideRoots. An ancestor that
+// is not a directory, or a final entry of the wrong kind, is
+// ErrDestinationConflict. Once a component is missing, nothing below it
+// can exist.
+func checkExisting(workspace, rel string, want entryKind) error {
+	parts := strings.Split(rel, string(filepath.Separator))
 	cur := workspace
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	for i, part := range parts {
 		cur = filepath.Join(cur, part)
 		info, err := os.Lstat(cur)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -312,186 +376,18 @@ func checkNoSymlink(workspace, rel string) error {
 		if err != nil {
 			return fmt.Errorf("workspace: lstat %s: %w", cur, err)
 		}
-		if info.Mode()&fs.ModeSymlink != 0 {
+		mode := info.Mode()
+		if mode&fs.ModeSymlink != 0 {
 			return fmt.Errorf("%w: %s is a symlink", ErrOutsideRoots, cur)
 		}
-	}
-	return nil
-}
-
-// writer performs every write of one Apply call relative to a workspace
-// directory descriptor, never following a symlink.
-type writer struct {
-	wsFD   int
-	toSync map[string]bool // workspace-relative dirs to fsync at the end
-}
-
-func newWriter(workspace string) (*writer, error) {
-	fd, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("workspace: open workspace %s: %w", workspace, err)
-	}
-	return &writer{wsFD: fd, toSync: map[string]bool{}}, nil
-}
-
-func (w *writer) close() { _ = unix.Close(w.wsFD) }
-
-// openDir opens the directory at rel (workspace-relative, "." for the
-// workspace) one component at a time with O_NOFOLLOW. With create set, a
-// missing component is created and its parent is scheduled for fsync. The
-// caller closes the returned descriptor.
-func (w *writer) openDir(rel string, create bool) (int, error) {
-	fd, err := unix.Dup(w.wsFD)
-	if err != nil {
-		return -1, fmt.Errorf("workspace: dup workspace fd: %w", err)
-	}
-	if rel == "." {
-		return fd, nil
-	}
-	cur := "."
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		next, err := openDirAt(fd, part)
-		if errors.Is(err, unix.ENOENT) && create {
-			mkErr := unix.Mkdirat(fd, part, 0o755)
-			switch {
-			case mkErr == nil:
-				w.toSync[cur] = true
-			case !errors.Is(mkErr, unix.EEXIST):
-				_ = unix.Close(fd)
-				return -1, fmt.Errorf("workspace: create %s: %w", filepath.Join(cur, part), mkErr)
+		final := i == len(parts)-1
+		switch {
+		case !final || want == kindDir:
+			if !mode.IsDir() {
+				return fmt.Errorf("%w: %s is not a directory", ErrDestinationConflict, cur)
 			}
-			next, err = openDirAt(fd, part)
-		}
-		if err != nil {
-			err = classifyOpenErr(fd, part, filepath.Join(cur, part), err)
-			_ = unix.Close(fd)
-			return -1, err
-		}
-		_ = unix.Close(fd)
-		fd = next
-		cur = filepath.Join(cur, part)
-	}
-	return fd, nil
-}
-
-func openDirAt(dirFD int, name string) (int, error) {
-	return unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-}
-
-// classifyOpenErr turns an O_NOFOLLOW refusal on a symlink into
-// ErrOutsideRoots; anything else stays a plain error.
-func classifyOpenErr(dirFD int, name, rel string, err error) error {
-	var st unix.Stat_t
-	if statErr := unix.Fstatat(dirFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
-		return fmt.Errorf("%w: %s is a symlink", ErrOutsideRoots, rel)
-	}
-	return fmt.Errorf("workspace: open dir %s: %w", rel, err)
-}
-
-func (w *writer) mkdirAll(rel string) error {
-	fd, err := w.openDir(rel, true)
-	if err != nil {
-		return err
-	}
-	return unix.Close(fd)
-}
-
-// writeFile writes one file durably through its temp sibling.
-func (w *writer) writeFile(f plannedFile) error {
-	dirRel := filepath.Dir(f.dest)
-	base := filepath.Base(f.dest)
-	tmp := "." + base + tmpSuffix
-
-	dirFD, err := w.openDir(dirRel, true)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = unix.Close(dirFD) }()
-
-	src, err := openSource(f.src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = src.Close() }()
-
-	// A leftover temp — from a crash, read-only, or a planted symlink — is
-	// removed rather than opened: O_EXCL below then guarantees the file
-	// written is one this call created.
-	if err := unix.Unlinkat(dirFD, tmp, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-		return fmt.Errorf("workspace: remove stale temp for %s: %w", f.dest, err)
-	}
-	tmpFD, err := unix.Openat(dirFD, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return fmt.Errorf("workspace: create temp file for %s: %w", f.dest, err)
-	}
-	out := os.NewFile(uintptr(tmpFD), filepath.Join(dirRel, tmp))
-
-	fail := func(step string, err error) error {
-		_ = out.Close()
-		_ = unix.Unlinkat(dirFD, tmp, 0)
-		return fmt.Errorf("workspace: %s %s: %w", step, f.dest, err)
-	}
-	if _, err := io.Copy(out, src); err != nil {
-		return fail("copy", err)
-	}
-	// Through the handle: a mode change by name could follow a symlink.
-	if err := out.Chmod(f.perm); err != nil {
-		return fail("chmod temp file for", err)
-	}
-	if err := out.Sync(); err != nil {
-		return fail("fsync temp file for", err)
-	}
-	if err := out.Close(); err != nil {
-		_ = unix.Unlinkat(dirFD, tmp, 0)
-		return fmt.Errorf("workspace: close temp file for %s: %w", f.dest, err)
-	}
-	if err := unix.Renameat(dirFD, tmp, dirFD, base); err != nil {
-		_ = unix.Unlinkat(dirFD, tmp, 0)
-		return fmt.Errorf("workspace: rename into place %s: %w", f.dest, err)
-	}
-	w.toSync[dirRel] = true
-	return nil
-}
-
-// openSource opens one source file without following a symlink and without
-// blocking on a FIFO, then insists it is a regular file.
-func openSource(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if errors.Is(err, unix.ELOOP) {
-		return nil, fmt.Errorf("%w: %s is a symlink", ErrUnsupportedSource, path)
-	}
-	if err != nil {
-		// A transient cause (permissions, I/O) stays retryable.
-		return nil, fmt.Errorf("workspace: open source %s: %w", path, err)
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsupportedSource, path)
-	}
-	return f, nil
-}
-
-// syncDirs fsyncs every scheduled directory, deepest first, making the
-// renames and directory creations of this call durable.
-func (w *writer) syncDirs() error {
-	dirs := make([]string, 0, len(w.toSync))
-	for d := range w.toSync {
-		dirs = append(dirs, d)
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
-	for _, d := range dirs {
-		fd, err := w.openDir(d, false)
-		if err != nil {
-			return err
-		}
-		syncErr := unix.Fsync(fd)
-		_ = unix.Close(fd)
-		if syncErr != nil {
-			return fmt.Errorf("workspace: fsync dir %s: %w", d, syncErr)
-		}
-		if syncedDirHook != nil {
-			syncedDirHook(d)
+		case !mode.IsRegular():
+			return fmt.Errorf("%w: %s exists and is not a regular file", ErrDestinationConflict, cur)
 		}
 	}
 	return nil

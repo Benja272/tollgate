@@ -2,12 +2,15 @@ package workspace
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -261,4 +264,183 @@ func TestApply_UnreadableSource_NotUnsupported(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrUnsupportedSource)
 	require.NotErrorIs(t, err, ErrOutsideRoots)
+}
+
+// A directory created by a failed earlier attempt must still be made
+// durable by the retry that succeeds (review R8, reproduced).
+func TestApply_RetryAfterFailure_FsyncsParentsOfDirectoriesItDidNotCreate(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission denial does not apply when running as root")
+	}
+	ws := t.TempDir()
+	src := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "a"), 0o755))
+	bad := filepath.Join(src, "a", "f.txt")
+	writeFile(t, bad, "f", 0o000)
+	ovs := []Overlay{{Source: src, Dest: "output/copied"}}
+
+	require.Error(t, Apply(context.Background(), ws, []string{"output"}, ovs, nil), "first attempt fails after creating the directories")
+	require.NoError(t, os.Chmod(bad, 0o644))
+
+	var synced []string
+	syncedDirHook = func(rel string) { synced = append(synced, rel) }
+	t.Cleanup(func() { syncedDirHook = nil })
+	require.NoError(t, Apply(context.Background(), ws, []string{"output"}, ovs, nil))
+
+	for _, dir := range []string{".", "output", "output/copied", "output/copied/a"} {
+		require.Contains(t, synced, dir)
+	}
+}
+
+// Permanent destination conflicts must be classified, not retried.
+func TestApply_DestinationConflicts_RejectedBeforeWriting(t *testing.T) {
+	longName := strings.Repeat("n", 250) // fits a name, not its temp name
+	cases := map[string]struct {
+		setup func(t *testing.T, ws, src string) []Overlay
+	}{
+		"file overlay onto an existing directory": {func(t *testing.T, ws, src string) []Overlay {
+			require.NoError(t, os.MkdirAll(filepath.Join(ws, "output", "x"), 0o755))
+			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/x"}}
+		}},
+		"path through an existing file": {func(t *testing.T, ws, src string) []Overlay {
+			writeFile(t, filepath.Join(ws, "output", "x"), "tracked", 0o644)
+			return []Overlay{{Source: fileIn(t, src, "y"), Dest: "output/x/y"}}
+		}},
+		"file and directory overlays collide": {func(t *testing.T, ws, src string) []Overlay {
+			dir := filepath.Join(src, "tree")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			writeFile(t, filepath.Join(dir, "y"), "y", 0o644)
+			return []Overlay{
+				{Source: fileIn(t, src, "x"), Dest: "output/x"},
+				{Source: dir, Dest: "output/x"},
+			}
+		}},
+		"file placed where another overlay needs a directory": {func(t *testing.T, ws, src string) []Overlay {
+			return []Overlay{
+				{Source: fileIn(t, src, "x"), Dest: "output/x"},
+				{Source: fileIn(t, src, "y"), Dest: "output/x/y"},
+			}
+		}},
+		"name too long for its temp name": {func(t *testing.T, ws, src string) []Overlay {
+			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/" + longName}}
+		}},
+		"directory at the temp name": {func(t *testing.T, ws, src string) []Overlay {
+			require.NoError(t, os.MkdirAll(filepath.Join(ws, "output", ".x"+tmpSuffix), 0o755))
+			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/x"}}
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ws := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(ws, "output"), 0o755))
+			ovs := tc.setup(t, ws, t.TempDir())
+			before := treeSnapshot(t, ws)
+
+			err := Apply(context.Background(), ws, []string{"output"}, ovs, nil)
+
+			require.ErrorIs(t, err, ErrDestinationConflict)
+			require.Equal(t, before, treeSnapshot(t, ws), "nothing may be written")
+		})
+	}
+}
+
+func fileIn(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	writeFile(t, p, name, 0o644)
+	return p
+}
+
+func treeSnapshot(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	require.NoError(t, filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		out = append(out, rel+":"+d.Type().String())
+		return nil
+	}))
+	return out
+}
+
+// The write path must refuse a source swapped after the pre-check: removing
+// O_NOFOLLOW or O_NONBLOCK must fail these tests.
+func TestApply_SourceSwappedAfterPrecheck_Refused(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		ws, engineFile := engineFixture(t)
+		src := filepath.Join(t.TempDir(), "x")
+		writeFile(t, src, "x", 0o644)
+		plantAfterPrecheck(t, func() {
+			require.NoError(t, os.Remove(src))
+			require.NoError(t, os.Symlink(engineFile, src))
+		})
+
+		err := Apply(context.Background(), ws, []string{"output"}, []Overlay{{Source: src, Dest: "output/x"}}, nil)
+
+		require.ErrorIs(t, err, ErrUnsupportedSource)
+		_, statErr := os.Lstat(filepath.Join(ws, "output", "x"))
+		require.True(t, os.IsNotExist(statErr), "the symlink target must not be copied")
+	})
+	t.Run("fifo", func(t *testing.T) {
+		ws, _ := engineFixture(t)
+		src := filepath.Join(t.TempDir(), "x")
+		writeFile(t, src, "x", 0o644)
+		plantAfterPrecheck(t, func() {
+			require.NoError(t, os.Remove(src))
+			require.NoError(t, syscall.Mkfifo(src, 0o644))
+		})
+
+		done := make(chan error, 1)
+		go func() {
+			done <- Apply(context.Background(), ws, []string{"output"}, []Overlay{{Source: src, Dest: "output/x"}}, nil)
+		}()
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrUnsupportedSource)
+		case <-time.After(3 * time.Second):
+			t.Fatal("opening a FIFO source blocked")
+		}
+	})
+}
+
+func TestApply_EveryFileFsyncedBeforeRename(t *testing.T) {
+	ws, _ := engineFixture(t)
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a"), "a", 0o644)
+	writeFile(t, filepath.Join(src, "b"), "b", 0o644)
+	var events []string
+	syncedFileHook = func(rel string) { events = append(events, "fsync "+rel) }
+	renamedFileHook = func(rel string) { events = append(events, "rename "+rel) }
+	t.Cleanup(func() { syncedFileHook, renamedFileHook = nil, nil })
+
+	require.NoError(t, Apply(context.Background(), ws, []string{"output"}, []Overlay{{Source: src, Dest: "output/c"}}, nil))
+
+	require.Equal(t, []string{
+		"fsync output/c/a", "rename output/c/a",
+		"fsync output/c/b", "rename output/c/b",
+	}, events)
+}
+
+func TestApply_ContextCancelledBetweenFiles_StopsWriting(t *testing.T) {
+	ws, _ := engineFixture(t)
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a"), "a", 0o644)
+	writeFile(t, filepath.Join(src, "b"), "b", 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	beats := 0
+	beat := func() {
+		beats++
+		if beats == 2 {
+			cancel()
+		}
+	}
+
+	err := Apply(ctx, ws, []string{"output"}, []Overlay{{Source: src, Dest: "output/c"}}, beat)
+
+	require.ErrorIs(t, err, context.Canceled)
+	_, statErr := os.Stat(filepath.Join(ws, "output", "c", "b"))
+	require.True(t, os.IsNotExist(statErr), "no file is written after cancellation")
 }
