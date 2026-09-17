@@ -16,6 +16,35 @@ a MUST from one of the four spec files.
 
 ---
 
+## Completion status (apply phase)
+
+All 16 tasks complete. Tasks 1-15 each landed as their own commit on branch
+`artifact-jobs`; Task 16 is the verification checklist below (no commit).
+
+- [x] Task 1 — capture replay histories — `c458f11`
+- [x] Task 2 — ports.AgentConfig / RunError / ModelUnknown — `c3f3635`
+- [x] Task 3 — claudecode `buildArgs` — `9b80c54`
+- [x] Task 4 — claudecode model resolution + `RunError` — `5863129`
+- [x] Task 5 — `runAgentAndRecord` extraction + billed-failure fix — `ac92740`
+- [x] Task 6 — `RunAgent` maps `RunError`→`AgentRunBilled`, model on span/ledger — `7c78124`
+- [x] Task 7 — `gitcli.Checkout` — `8ee489a`
+- [x] Task 8 — `workspace.Apply` / `ValidatePaths` — `eabdf5e`
+- [x] Task 9 — `CheckoutWorkspace` / `ApplyOverlay` activities, `withHeartbeat` — `036addc`
+- [x] Task 10 — `ArtifactJobWorkflow`, `validate()` — `d3a67ac` (see Deviations note below)
+- [x] Task 11 — `piece_id` migration + ledger persistence + per-piece query — `07802b6` (Postgres gap: see note)
+- [x] Task 12 — worker wiring (`cmd/worker/main.go`) — `5b08e42`
+- [x] Task 13 — replay regression gate against Task 1's fixtures — `2ec7101` (no determinism fix needed)
+- [x] Task 14 — E2E test on a real Temporal dev server — `8784fa3`
+- [x] Task 15 — docs (`DESIGN.md` §2.1, `docs/artifact-job-cli.md`) — `07b69c2`
+- [x] Task 16 — final verification gate — see commands and results below; Postgres gap called out explicitly
+
+**Deviations (documented, not silent)**:
+1. Task 1's literal precondition `git rev-parse HEAD == 9a5be05` did not hold (two docs-only SDD commits landed on top); verified instead that `git diff --stat 9a5be05 HEAD` touched zero `.go` files, which is the substantive precondition the ordering constraint protects.
+2. Task 10 filled two gaps the original breakdown left open: (a) `RunAgentInput` had no `AgentConfig` field, so nothing threaded `ArtifactJobInput.AgentConfig` into `ports.RunSpec` — added `RunAgentInput.AgentConfig` and wired it in `activities.go`'s `RunAgent`; (b) `CheckoutInput.Path` (Task 9) became `CheckoutInput.JobID`, with `CheckoutWorkspace` computing `<WorkspaceRoot>/tollgate-artifact-<JobID>` itself (mirroring `Prepare`), because D7 ("the git adapter never builds the path") is assigned to Task 10 in the traceability matrix, not Task 9.
+3. Task 11: no Postgres instance is provisioned for this repo in the apply environment (a system Postgres is reachable on `localhost:5432` but the `tollgate`/`tollgate` role/db does not exist there and was not created, to avoid touching a shared instance out of scope). All Postgres-backed tests skip cleanly via the existing `TOLLGATE_TEST_DATABASE_URL` / `TOLLGATE_REQUIRE_POSTGRES` rule; the migration was verified with `goose -dir migrations validate` (0 errors) instead of a live apply. This is a environment gap, not a code defect — flagged per Task 16's own instruction rather than silently treated as done.
+
+---
+
 ## Ordering constraint (hard, non-negotiable)
 
 **Task 1 must run first, at base commit `9a5be05`, before any production line
