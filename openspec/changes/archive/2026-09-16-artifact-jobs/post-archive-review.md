@@ -88,7 +88,7 @@ verify report.
 | `efc5f43` | fix(workspace): make retried directories durable and classify destination conflicts |
 | `8b2eacb` | fix(gitcli): reuse only an untouched worktree and keep transient failures retryable |
 | `7ea599b` | test(engine): capture ArtifactJobWorkflow replay fixtures as its determinism gate |
-| docs commit after these | ADR-0006 round-2 amendments, living specs, CLI doc, this section |
+| `c9d24b3` | ADR-0006 round-2 amendments, living specs, CLI doc, this section |
 
 ### Blockers
 
