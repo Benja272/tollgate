@@ -37,8 +37,8 @@ func (j *CLIJudge) Judge(ctx context.Context, req ports.JudgeRequest) (ports.Jud
 		return ports.Judgment{}, fmt.Errorf("judge %s run: %w", j.Model, err)
 	}
 
-	var env resultEnvelope
-	if err := json.Unmarshal(out, &env); err != nil {
+	env, err := parseEnvelope(out)
+	if err != nil {
 		return ports.Judgment{}, fmt.Errorf("judge %s: parse claude output: %w", j.Model, err)
 	}
 	if env.IsError {
@@ -57,7 +57,7 @@ func (j *CLIJudge) Judge(ctx context.Context, req ports.JudgeRequest) (ports.Jud
 			Scores:        payload.Scores,
 			Findings:      payload.Findings,
 		},
-		CostUSD: env.TotalCostUSD,
+		CostUSD: env.cost(),
 		Usage:   env.Usage.toPort(),
 	}, nil
 }

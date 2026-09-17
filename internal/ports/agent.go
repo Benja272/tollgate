@@ -11,12 +11,12 @@ import (
 
 // ErrInvalidAgentConfig is returned when AgentConfig fails to parse or
 // contains a value the adapter refuses to forward to the harness (ADR-0006
-// D1). It crosses the port boundary as a sentinel so RunAgent can map it to
+// §5). It crosses the port boundary as a sentinel so RunAgent can map it to
 // a non-retryable error without the engine ever inspecting adapter internals.
 var ErrInvalidAgentConfig = errors.New("ports: invalid agent config")
 
 // ModelUnknown labels a run whose resolved model could not be determined:
-// no modelUsage was reported and no model alias was requested (ADR-0006 D4).
+// no modelUsage was reported and no model alias was requested (ADR-0006 §7).
 // The run does not fail; every ledger row still records SOME model label.
 const ModelUnknown = "unknown"
 
@@ -49,7 +49,7 @@ type RunResult struct {
 	SessionID string
 	// Model is the resolved model id the run actually used: the highest-cost
 	// modelUsage key when the harness reports one, else the requested alias,
-	// else ModelUnknown (ADR-0006 D4). Output normalization, not a first-class
+	// else ModelUnknown (ADR-0006 §7). Output normalization, not a first-class
 	// engine concept — ADR-0002 permits it.
 	Model string
 }
@@ -60,12 +60,19 @@ type AgentRunner interface {
 	Run(ctx context.Context, spec RunSpec) (RunResult, error)
 }
 
+// AgentConfigValidator is implemented by runners that can check an
+// AgentConfig without starting the harness, so a job can fail on a bad
+// config before any workspace is prepared. It returns the model the config
+// requests, empty when it names none; the format stays the adapter's
+// (ADR-0002).
+type AgentConfigValidator interface {
+	ValidateConfig(cfg json.RawMessage) (requestedModel string, err error)
+}
+
 // RunError wraps a partial RunResult with the error that ended the run. It
 // signals a BILLED failure: the harness produced a parseable result envelope
-// (is_error=true, or a non-zero exit with a parseable envelope) before
-// failing, so the partial cost/usage/model must be recorded before the job
-// fails (ADR-0006 D14). A crash or kill with no parseable envelope is a
-// plain error instead — nothing was billed, so nothing to record.
+// (is_error=true, or a failed exit after printing one), so the partial
+// cost/usage/model must be recorded before the job fails (ADR-0006 §8).
 type RunError struct {
 	Result RunResult
 	Err    error
@@ -76,5 +83,24 @@ func (e *RunError) Error() string {
 }
 
 func (e *RunError) Unwrap() error {
+	return e.Err
+}
+
+// UnmeteredRunError signals a run that was killed — by a deadline, a
+// cancellation, or a signal — before it printed a result envelope. The
+// harness may already have spent money that nobody can measure, so the run
+// must never be retried automatically: a retry would bill again on top of
+// an unknown amount (ADR-0006 §8). Any other failure without an envelope
+// (the binary is missing, or exited non-zero with no envelope) is a plain
+// error.
+type UnmeteredRunError struct {
+	Err error
+}
+
+func (e *UnmeteredRunError) Error() string {
+	return fmt.Sprintf("unmetered agent run (killed before reporting its cost): %v", e.Err)
+}
+
+func (e *UnmeteredRunError) Unwrap() error {
 	return e.Err
 }

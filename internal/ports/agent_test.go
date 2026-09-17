@@ -31,3 +31,11 @@ func TestRunError_UnwrapsToUnderlyingErr(t *testing.T) {
 	require.ErrorAs(t, re, &target)
 	assert.Equal(t, "claude-haiku-5", target.Result.Model)
 }
+
+func TestUnmeteredRunError_UnwrapsAndNamesTheRisk(t *testing.T) {
+	cause := errors.New("signal: killed")
+	err := error(&UnmeteredRunError{Err: cause})
+
+	require.ErrorIs(t, err, cause)
+	require.Contains(t, err.Error(), "unmetered")
+}
