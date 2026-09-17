@@ -174,8 +174,12 @@ func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, 
 		if ctx.Err() != nil || killedBySignal(runErr) {
 			// Killed mid-run: the harness may have spent money that no
 			// envelope reports.
+			cause := runErr
+			if ctx.Err() != nil {
+				cause = fmt.Errorf("%w (%w)", runErr, ctx.Err())
+			}
 			return ports.RunResult{}, &ports.UnmeteredRunError{
-				Err: fmt.Errorf("claude code run: %w (context: %v)%s", runErr, ctx.Err(), stderr.suffix()),
+				Err: fmt.Errorf("claude code run: %w%s", cause, stderr.suffix()),
 			}
 		}
 		return ports.RunResult{}, fmt.Errorf("claude code run: %w%s", runErr, stderr.suffix())
