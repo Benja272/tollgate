@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -316,6 +317,8 @@ func TestActivities_RunAgent_ErrorClasses_AttemptsThroughTemporal(t *testing.T) 
 	}{
 		{"invalid agent config", errors.Join(ports.ErrInvalidAgentConfig, errors.New("bad")), errTypeInvalidAgentConfig, 1},
 		{"unmetered run", &ports.UnmeteredRunError{Err: context.DeadlineExceeded}, errTypeAgentRunUnmetered, 1},
+		{"ambiguous envelope", &ports.UnmeteredRunError{Err: ports.ErrAmbiguousEnvelope}, errTypeAgentRunAmbiguousEnvelope, 1},
+		{"unsupported platform", fmt.Errorf("claude code: %w", errors.ErrUnsupported), errTypeUnsupportedPlatform, 1},
 		{"billed run", &ports.RunError{Result: ports.RunResult{CostUSD: 0.3}, Err: errors.New("is_error")}, errTypeAgentRunBilled, 1},
 		{"plain crash stays retryable", errors.New("exec: claude: not found"), "", 3},
 	}
@@ -935,4 +938,20 @@ func TestActivities_RunAgent_Unmetered_LogCarriesJobAndAttempt(t *testing.T) {
 		}
 	}
 	require.True(t, found, "the unmetered run must be logged")
+}
+
+func TestActivities_RunAgent_AmbiguousEnvelope_CountedLikeUnmetered(t *testing.T) {
+	tel := newRecordingTelemetry(t)
+	acts := &Activities{
+		Agent: &validatingRunner{run: func(context.Context) (ports.RunResult, error) {
+			return ports.RunResult{}, &ports.UnmeteredRunError{Err: fmt.Errorf("two envelopes: %w", ports.ErrAmbiguousEnvelope)}
+		}},
+		HeartbeatInterval: time.Hour,
+		Telemetry:         tel.inst,
+	}
+
+	_, err := acts.RunAgent(context.Background(), RunAgentInput{JobID: "job-a", Attempt: 1})
+
+	requireNonRetryableType(t, err, errTypeAgentRunAmbiguousEnvelope)
+	require.Equal(t, int64(1), int64Sum(t, tel, "tollgate.agent.unmetered_runs"))
 }

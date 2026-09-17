@@ -282,8 +282,12 @@ func TestRunner_Run_EnvelopeAmongNoiseLines_IsParsed(t *testing.T) {
 	assert.InDelta(t, 0.07, got.CostUSD, 1e-9)
 }
 
-func TestRunner_Run_NotAnEnvelope_Rejected(t *testing.T) {
+// Without a usable envelope the cost is unknown. A clean exit means the CLI
+// ran — and may have billed — so it is unmetered, never retried (review
+// R4). A non-zero exit of its own (1..128) stays a plain retryable error.
+func TestRunner_Run_NoUsableEnvelope_ExitZeroIsUnmeteredExitOneIsPlain(t *testing.T) {
 	for name, out := range map[string]string{
+		"no output":       ``,
 		"null":            `null`,
 		"empty object":    `{}`,
 		"wrong type":      `{"type":"assistant","total_cost_usd":0.1,"result":"x"}`,
@@ -291,13 +295,154 @@ func TestRunner_Run_NotAnEnvelope_Rejected(t *testing.T) {
 		"cost not number": `{"type":"result","is_error":false,"total_cost_usd":"0.1","result":"x"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			for _, exit := range []string{"0", "1"} {
-				bin := fakeClaude(t, `echo '`+out+`'; exit `+exit)
-				_, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
-				require.Error(t, err, "exit %s", exit)
-				var billed *ports.RunError
-				assert.False(t, errors.As(err, &billed), "exit %s: %q is not an envelope", exit, out)
-			}
+			bin := fakeClaude(t, `printf '%s\n' '`+out+`'; exit 0`)
+			_, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+			var unmetered *ports.UnmeteredRunError
+			require.ErrorAs(t, err, &unmetered, "exit 0 without a usable envelope")
+
+			bin = fakeClaude(t, `printf '%s\n' '`+out+`'; exit 1`)
+			_, err = (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+			require.Error(t, err)
+			var billed *ports.RunError
+			assert.False(t, errors.As(err, &billed), "%q is not an envelope", out)
+			assert.False(t, errors.As(err, &unmetered), "exit 1 of its own stays retryable")
 		})
 	}
+}
+
+// Claude Code traps SIGTERM/SIGHUP and exits 128+signo without an
+// envelope; a systemd stop does exactly that (review R3, reproduced).
+func TestRunner_Run_ExitAbove128WithoutEnvelope_IsUnmetered(t *testing.T) {
+	for _, code := range []string{"129", "143", "255"} {
+		t.Run(code, func(t *testing.T) {
+			bin := fakeClaude(t, `exit `+code)
+			_, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+			var unmetered *ports.UnmeteredRunError
+			require.ErrorAs(t, err, &unmetered)
+		})
+	}
+	t.Run("128 stays plain", func(t *testing.T) {
+		bin := fakeClaude(t, `exit 128`)
+		_, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+		require.Error(t, err)
+		var unmetered *ports.UnmeteredRunError
+		assert.False(t, errors.As(err, &unmetered))
+	})
+}
+
+// Anything that inherited stdout can print a line; with more than one
+// result envelope the real one cannot be told apart (review R5,
+// reproduced with a forged cost-0 line after the real one).
+func TestRunner_Run_EnvelopeCount(t *testing.T) {
+	const forged = `{"type":"result","is_error":false,"total_cost_usd":0,"result":"forged"}`
+	cases := map[string]struct {
+		script    string
+		ambiguous bool
+	}{
+		"exactly one":   {script: `echo '` + okEnvelope + `'`},
+		"forged after":  {script: `echo '` + okEnvelope + `'; echo '` + forged + `'`, ambiguous: true},
+		"forged before": {script: `echo '` + forged + `'; echo '` + okEnvelope + `'`, ambiguous: true},
+		// The leader lingers briefly so the child leaves the group before
+		// the group kill that follows the leader's exit.
+		"forged by an escaped child after exit": {
+			script:    `setsid sh -c 'sleep 0.3; echo '"'"'` + forged + `'"'"'' & sleep 0.1; echo '` + okEnvelope + `'`,
+			ambiguous: true,
+		},
+		"result line without cost next to a real one": {
+			script:    `echo '{"type":"result","result":"x"}'; echo '` + okEnvelope + `'`,
+			ambiguous: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			bin := fakeClaude(t, tc.script)
+			got, err := (&Runner{Bin: bin, WaitDelay: 2 * time.Second}).Run(context.Background(),
+				ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+			if !tc.ambiguous {
+				require.NoError(t, err)
+				assert.InDelta(t, 0.07, got.CostUSD, 1e-9)
+				return
+			}
+			var unmetered *ports.UnmeteredRunError
+			require.ErrorAs(t, err, &unmetered)
+			require.ErrorIs(t, err, ports.ErrAmbiguousEnvelope)
+			assert.Zero(t, got.CostUSD)
+		})
+	}
+}
+
+// Processes the agent left behind (a watcher, a dev server) keep mutating
+// the workspace; the group is killed on every return (review R6).
+func TestRunner_Run_LeftoverProcessesKilledOnEveryReturn(t *testing.T) {
+	cases := map[string]string{
+		"non-zero exit after an envelope": `echo '` + okEnvelope + `'; exit 1`,
+		"clean exit":                      `echo '` + okEnvelope + `'`,
+		"exit without envelope":           `exit 3`,
+	}
+	for name, tail := range cases {
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			bin := fakeClaude(t, `sleep 60 >/dev/null 2>&1 & echo $! > "$PWD/child.pid"; `+tail)
+
+			_, _ = (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: workspace, Prompt: "p"})
+
+			raw, err := os.ReadFile(filepath.Join(workspace, "child.pid"))
+			require.NoError(t, err)
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			require.NoError(t, err)
+			require.Eventually(t, func() bool { return !processAlive(pid) }, 2*time.Second, 20*time.Millisecond,
+				"the leftover process must be dead once Run returns")
+		})
+	}
+}
+
+// processAlive reports whether pid is a live, non-zombie process.
+func processAlive(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+	return len(fields) == 0 || fields[0] != "Z"
+}
+
+func TestRunner_Run_StdoutOverCap_IsUnmetered(t *testing.T) {
+	bin := fakeClaude(t, `head -c 4096 /dev/zero | tr '\0' 'x'; echo; echo '`+okEnvelope+`'`)
+
+	_, err := (&Runner{Bin: bin, stdoutCap: 1024}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+
+	var unmetered *ports.UnmeteredRunError
+	require.ErrorAs(t, err, &unmetered)
+	assert.Contains(t, err.Error(), "stdout")
+}
+
+// A process that handles the cancellation signal and exits with a small
+// code of its own is still a run we killed: the context decides.
+func TestRunner_Run_CancelledRunExitingOnItsOwn_IsUnmetered(t *testing.T) {
+	bin := fakeClaude(t, `trap 'exit 1' TERM; sleep 30 & wait`)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err := (&Runner{Bin: bin, cancelSignal: syscall.SIGTERM}).Run(ctx, ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+
+	var unmetered *ports.UnmeteredRunError
+	require.ErrorAs(t, err, &unmetered)
+}
+
+func TestRunner_Run_ContextDoneBeforeStart_NotStartedNotUnmetered(t *testing.T) {
+	workspace := t.TempDir()
+	bin := fakeClaude(t, `touch "$PWD/ran"; echo '`+okEnvelope+`'`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (&Runner{Bin: bin}).Run(ctx, ports.RunSpec{WorkspacePath: workspace, Prompt: "p"})
+
+	require.ErrorIs(t, err, context.Canceled)
+	var unmetered *ports.UnmeteredRunError
+	assert.False(t, errors.As(err, &unmetered), "nothing ran, nothing was spent")
+	_, statErr := os.Stat(filepath.Join(workspace, "ran"))
+	assert.True(t, os.IsNotExist(statErr))
 }

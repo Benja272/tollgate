@@ -104,6 +104,12 @@ func (e *RunError) Unwrap() error {
 	return e.Err
 }
 
+// ErrAmbiguousEnvelope means the harness output held more than one result
+// envelope. Anything that inherited the harness's stdout can print one, so
+// the real cost cannot be told from a forged one; the run is treated like
+// an unmetered one (wrapped in an UnmeteredRunError).
+var ErrAmbiguousEnvelope = errors.New("ports: more than one result envelope")
+
 // UnmeteredRunError signals a run that was killed — by a deadline, a
 // cancellation, or a signal — before it printed a result envelope. The
 // harness may already have spent money that nobody can measure, so the run

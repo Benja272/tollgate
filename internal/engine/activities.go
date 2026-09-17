@@ -56,6 +56,14 @@ const (
 	// errTypeAgentRunBudgetTooShort marks a run refused before it started:
 	// the activity budget is below the kill margin. Nothing was spent.
 	errTypeAgentRunBudgetTooShort = "AgentRunBudgetTooShort"
+
+	// errTypeAgentRunAmbiguousEnvelope marks a run whose output held more
+	// than one result envelope: its cost cannot be trusted, so it is
+	// handled like an unmetered run.
+	errTypeAgentRunAmbiguousEnvelope = "AgentRunAmbiguousEnvelope"
+	// errTypeUnsupportedPlatform marks an adapter or overlay that cannot
+	// run on this operating system.
+	errTypeUnsupportedPlatform = "UnsupportedPlatform"
 )
 
 // nonRetryable is one sentinel-to-type mapping for asNonRetryable.
@@ -184,12 +192,15 @@ func (a *Activities) Prepare(ctx context.Context, in JobInput) (Workspace, error
 //   - *ports.RunError: the harness reported its cost before failing. It
 //     becomes a non-retryable AgentRunBilled error carrying cost, usage and
 //     model, so runAgentAndRecord records the row before the job fails.
-//   - *ports.UnmeteredRunError: the run was killed before reporting a cost.
-//     It may have billed, so it becomes a non-retryable AgentRunUnmetered
-//     error, logged and counted, and nothing is recorded.
-//   - ports.ErrInvalidAgentConfig: non-retryable InvalidAgentConfig.
-//   - anything else (the harness never ran, or exited without an envelope)
-//     stays retryable within the policy's attempt cap.
+//   - *ports.UnmeteredRunError: the run ended without one usable cost
+//     report (killed, trapped a signal, exited cleanly without an envelope,
+//     or printed several). It may have billed, so it becomes a non-retryable
+//     AgentRunUnmetered (or AgentRunAmbiguousEnvelope) error, logged and
+//     counted, and nothing is recorded.
+//   - ports.ErrInvalidAgentConfig: non-retryable InvalidAgentConfig;
+//     errors.ErrUnsupported: non-retryable UnsupportedPlatform.
+//   - anything else (the harness never started, or exited 1..128 on its
+//     own without an envelope) stays retryable within the attempt cap.
 func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResult, error) {
 	// Attempt 1 is the original agent; later attempts are the fix loop's
 	// fixer actor (ADR-0003) — the span must agree with the ledger on that.
@@ -240,13 +251,19 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 		return AgentResult{}, temporal.NewNonRetryableApplicationError(
 			billedErr.Error(), errTypeAgentRunBilled, nil, details)
 	case errors.As(err, &unmeteredErr):
-		activityLogger(ctx).Error("unmetered agent run: killed before reporting its cost; not retried",
-			"job_id", in.JobID, "attempt", in.Attempt, "error", err)
+		errType := errTypeAgentRunUnmetered
+		if errors.Is(err, ports.ErrAmbiguousEnvelope) {
+			errType = errTypeAgentRunAmbiguousEnvelope
+		}
+		activityLogger(ctx).Error("unmetered agent run: its cost is unknown; not retried",
+			"job_id", in.JobID, "attempt", in.Attempt, "type", errType, "error", err)
 		a.Telemetry.RecordUnmeteredRun(ctx, call)
-		return AgentResult{}, temporal.NewNonRetryableApplicationError(
-			err.Error(), errTypeAgentRunUnmetered, err)
+		return AgentResult{}, temporal.NewNonRetryableApplicationError(err.Error(), errType, err)
 	default:
-		return AgentResult{}, asNonRetryable(err, nonRetryable{ports.ErrInvalidAgentConfig, errTypeInvalidAgentConfig})
+		return AgentResult{}, asNonRetryable(err,
+			nonRetryable{ports.ErrInvalidAgentConfig, errTypeInvalidAgentConfig},
+			nonRetryable{errors.ErrUnsupported, errTypeUnsupportedPlatform},
+		)
 	}
 
 	if res.Model == ports.ModelUnknown {

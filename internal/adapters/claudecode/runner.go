@@ -17,24 +17,36 @@ import (
 )
 
 // defaultWaitDelay bounds how long Run waits for the agent's output pipes
-// after the agent exits or is killed. A background process the agent
-// started inherits stdout and would otherwise hold Run open until the
-// activity times out, losing an envelope that was already printed.
+// after the agent exits or is killed. A process that escaped the agent's
+// process group can hold stdout open; without a bound it would keep Run
+// open until the activity times out, losing an envelope already printed.
 const defaultWaitDelay = 10 * time.Second
 
 // stderrTailBytes bounds the stderr excerpt carried in run errors.
 const stderrTailBytes = 2048
+
+// defaultStdoutCap bounds the captured stdout. A result envelope is small;
+// output beyond this means something other than the CLI is writing, and the
+// run's cost can no longer be trusted.
+const defaultStdoutCap = 64 << 20
 
 // Runner shells the Claude Code CLI. Bin is the binary to invoke, normally
 // "claude"; tests point it at a fake. WaitDelay overrides defaultWaitDelay.
 type Runner struct {
 	Bin       string
 	WaitDelay time.Duration
+
+	// stdoutCap overrides defaultStdoutCap; tests shrink it.
+	stdoutCap int
+	// cancelSignal is sent to the process group on cancellation; zero means
+	// SIGKILL. Tests use a catchable signal.
+	cancelSignal syscall.Signal
 }
 
 var (
 	_ ports.AgentRunner          = (*Runner)(nil)
 	_ ports.AgentConfigValidator = (*Runner)(nil)
+	_ ports.ShutdownBounder      = (*Runner)(nil)
 )
 
 // resultEnvelope is the subset of Claude Code's JSON result output tollgate
@@ -60,34 +72,46 @@ func (e resultEnvelope) cost() float64 {
 // errNoEnvelope means the output holds no result envelope.
 var errNoEnvelope = errors.New("no result envelope in claude code output")
 
-// parseEnvelope finds the result envelope in the CLI's stdout: the whole
-// output when it is one, else the last line that is one, so warnings the
-// CLI prints around it do not hide a billed run. A value counts only when
-// its type is "result" and it reports total_cost_usd: `null`, `{}` and
-// other JSON objects are not envelopes.
+// parseEnvelope finds the single usable result envelope in the CLI's
+// stdout. Anything that inherited stdout can print a line, so the output
+// must hold EXACTLY ONE result-typed JSON object — the whole output, or one
+// line among noise lines. More than one is ErrAmbiguousEnvelope: the real
+// envelope cannot be told from a forged one. One without total_cost_usd,
+// or none, is errNoEnvelope.
 func parseEnvelope(out []byte) (resultEnvelope, error) {
-	if env, ok := decodeEnvelope(bytes.TrimSpace(out)); ok {
-		return env, nil
-	}
-	lines := bytes.Split(out, []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 || line[0] != '{' {
-			continue
-		}
-		if env, ok := decodeEnvelope(line); ok {
-			return env, nil
+	var candidates [][]byte
+	if whole := bytes.TrimSpace(out); isResultObject(whole) {
+		candidates = [][]byte{whole}
+	} else {
+		for _, line := range bytes.Split(out, []byte("\n")) {
+			if line = bytes.TrimSpace(line); isResultObject(line) {
+				candidates = append(candidates, line)
+			}
 		}
 	}
-	return resultEnvelope{}, errNoEnvelope
+	switch len(candidates) {
+	case 0:
+		return resultEnvelope{}, errNoEnvelope
+	case 1:
+	default:
+		return resultEnvelope{}, fmt.Errorf("%d result envelopes in stdout: %w", len(candidates), ports.ErrAmbiguousEnvelope)
+	}
+	var env resultEnvelope
+	if err := json.Unmarshal(candidates[0], &env); err != nil || env.TotalCostUSD == nil {
+		return resultEnvelope{}, fmt.Errorf("%w: the result envelope reports no usable total_cost_usd", errNoEnvelope)
+	}
+	return env, nil
 }
 
-func decodeEnvelope(b []byte) (resultEnvelope, bool) {
-	var env resultEnvelope
-	if err := json.Unmarshal(b, &env); err != nil {
-		return resultEnvelope{}, false
+// isResultObject reports whether b is a JSON object whose type is "result".
+func isResultObject(b []byte) bool {
+	if len(b) == 0 || b[0] != '{' {
+		return false
 	}
-	return env, env.Type == "result" && env.TotalCostUSD != nil
+	var probe struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(b, &probe) == nil && probe.Type == "result"
 }
 
 // modelUsageEntry is one model's contribution to a run, as Claude Code
@@ -116,8 +140,6 @@ func (u envelopeUsage) toPort() ports.TokenUsage {
 		CacheCreationTokens: u.CacheCreationTokens,
 	}
 }
-
-var _ ports.ShutdownBounder = (*Runner)(nil)
 
 // ValidateConfig checks cfg exactly as Run would, without starting the CLI,
 // plus the job shape's requirements.
@@ -148,65 +170,98 @@ func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, 
 	// error is unreachable and safely ignored.
 	cfg, _, _ := parseAgentConfig(spec.AgentConfig)
 
+	if err := ctx.Err(); err != nil {
+		// Nothing started, so nothing was spent.
+		return ports.RunResult{}, fmt.Errorf("claude code run not started: %w", err)
+	}
+
 	cmd := exec.CommandContext(ctx, r.Bin, args...)
 	cmd.Dir = spec.WorkspacePath
 	// cmd.Stdin is deliberately left nil: os/exec connects a nil Stdin to
 	// the null device, and an explicit *os.File open here could shadow
 	// that default. Claude Code headless waits ~3s on a stdin that never
 	// closes, so this must never regress.
-	var stdout bytes.Buffer
+	stdout := &cappedBuffer{max: r.stdoutLimit()}
 	stderr := &tailBuffer{max: stderrTailBytes}
-	cmd.Stdout = &stdout
+	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// The agent and everything its tools start share one process group,
-	// so a cancellation kills all of them, not only the CLI.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killGroup(cmd) }
+	// The agent and everything its tools start share one process group:
+	// cancellation, and every return from Run, kills all of them.
+	sig := r.killSignal()
+	configureProcess(cmd, syscall.SIGKILL)
+	cmd.Cancel = func() error { return killGroup(cmd, sig) }
 	cmd.WaitDelay = r.waitDelay()
 
-	runErr := cmd.Run()
+	runErr := runProcess(cmd)
+	if cmd.Process == nil {
+		// The CLI never started (missing binary, unsupported platform).
+		return ports.RunResult{}, fmt.Errorf("claude code run: %w", runErr)
+	}
 	if errors.Is(runErr, exec.ErrWaitDelay) {
-		// The CLI exited cleanly but something it started still holds its
-		// output: kill the leftovers (the group is still populated, so its
-		// id cannot have been reused) and read what the CLI printed.
-		_ = killGroup(cmd)
+		// The CLI exited cleanly; something that escaped its group still
+		// held the output. What the CLI printed is still read.
 		runErr = nil
 	}
+	return classifyRun(ctx, runErr, stdout, stderr, cfg.Model)
+}
 
+// classifyRun turns a finished run into a result or one of the failure
+// classes of ADR-0006 §8.
+func classifyRun(ctx context.Context, runErr error, stdout *cappedBuffer, stderr *tailBuffer, requestedModel string) (ports.RunResult, error) {
+	if stdout.overflowed {
+		return ports.RunResult{}, &ports.UnmeteredRunError{
+			Err: fmt.Errorf("claude code stdout exceeded %d bytes; the reported cost cannot be trusted%s", stdout.max, stderr.suffix()),
+		}
+	}
 	env, envErr := parseEnvelope(stdout.Bytes())
-	if runErr != nil {
-		if envErr == nil {
+	if errors.Is(envErr, ports.ErrAmbiguousEnvelope) {
+		return ports.RunResult{}, &ports.UnmeteredRunError{Err: fmt.Errorf("claude code run: %w%s", envErr, stderr.suffix())}
+	}
+	if envErr == nil {
+		result := envelopeToResult(env, requestedModel)
+		switch {
+		case runErr != nil:
 			// The CLI reported its cost before failing: the run was billed.
 			return ports.RunResult{}, &ports.RunError{
-				Result: envelopeToResult(env, cfg.Model),
+				Result: result,
 				Err:    fmt.Errorf("claude code exited with a failure: %w%s", runErr, stderr.suffix()),
 			}
-		}
-		if ctx.Err() != nil || killedBySignal(runErr) {
-			// Killed mid-run: the harness may have spent money that no
-			// envelope reports.
-			cause := runErr
-			if ctx.Err() != nil {
-				cause = fmt.Errorf("%w (%w)", runErr, ctx.Err())
-			}
-			return ports.RunResult{}, &ports.UnmeteredRunError{
-				Err: fmt.Errorf("claude code run: %w%s", cause, stderr.suffix()),
+		case env.IsError:
+			return ports.RunResult{}, &ports.RunError{
+				Result: result,
+				Err:    fmt.Errorf("claude code reported error: %s", env.Result),
 			}
 		}
-		return ports.RunResult{}, fmt.Errorf("claude code run: %w%s", runErr, stderr.suffix())
+		return result, nil
 	}
 
-	if envErr != nil {
-		return ports.RunResult{}, fmt.Errorf("parse claude code output: %w%s", envErr, stderr.suffix())
-	}
-	result := envelopeToResult(env, cfg.Model)
-	if env.IsError {
-		return ports.RunResult{}, &ports.RunError{
-			Result: result,
-			Err:    fmt.Errorf("claude code reported error: %s", env.Result),
+	// No usable envelope: the cost is unknown.
+	if runErr == nil || ctx.Err() != nil || killedOrTerminated(runErr) {
+		// The CLI ran and ended without reporting — a clean exit, a kill we
+		// issued, or a signal it trapped (it exits 128+signo). It may have
+		// billed; a retry would bill again.
+		cause := runErr
+		if cause == nil {
+			cause = envErr
+		} else if ctx.Err() != nil {
+			cause = fmt.Errorf("%w (%w)", runErr, ctx.Err())
+		}
+		return ports.RunResult{}, &ports.UnmeteredRunError{
+			Err: fmt.Errorf("claude code run: %w%s", cause, stderr.suffix()),
 		}
 	}
-	return result, nil
+	return ports.RunResult{}, fmt.Errorf("claude code run: %w%s", runErr, stderr.suffix())
+}
+
+// killedOrTerminated reports a death by signal, or an exit status above 128
+// — how a shell or the CLI reports a signal it handled.
+func killedOrTerminated(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	code := exitErr.ExitCode()
+	return code == -1 || code > 128
 }
 
 func (r *Runner) waitDelay() time.Duration {
@@ -216,22 +271,41 @@ func (r *Runner) waitDelay() time.Duration {
 	return defaultWaitDelay
 }
 
-// killGroup SIGKILLs the command's whole process group.
-func killGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
+func (r *Runner) stdoutLimit() int {
+	if r.stdoutCap > 0 {
+		return r.stdoutCap
 	}
-	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	return defaultStdoutCap
 }
 
-func killedBySignal(err error) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false
+func (r *Runner) killSignal() syscall.Signal {
+	if r.cancelSignal != 0 {
+		return r.cancelSignal
 	}
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled()
+	return syscall.SIGKILL
 }
+
+// cappedBuffer keeps the first max bytes written to it and records whether
+// more arrived. It never fails a write, so the process is not disturbed.
+type cappedBuffer struct {
+	max        int
+	buf        bytes.Buffer
+	overflowed bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.buf.Len(); len(p) > room {
+		b.overflowed = true
+		if room > 0 {
+			b.buf.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	return len(p), nil
+}
+
+func (b *cappedBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 // tailBuffer keeps only the last max bytes written to it.
 type tailBuffer struct {
