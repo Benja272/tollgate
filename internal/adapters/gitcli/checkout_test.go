@@ -166,3 +166,45 @@ func TestCheckout_RunsNoRepositoryHooks(t *testing.T) {
 	_, err := os.Stat(marker)
 	require.True(t, os.IsNotExist(err), "post-checkout hook must never run (core.hooksPath=/dev/null on every invocation)")
 }
+
+// Reuse must only accept the root of a linked worktree of the same repo:
+// a subdirectory of a matching worktree, or the repository's own main
+// worktree, passes the old common-dir/HEAD/status checks but is not a
+// checkout tollgate created.
+func TestCheckout_ReuseRequiresLinkedWorktreeRoot(t *testing.T) {
+	t.Run("subdirectory of a matching worktree", func(t *testing.T) {
+		repo, _, sha2 := setupRepo(t)
+		ws := filepath.Join(t.TempDir(), "ws")
+		c := Checkout{}
+		require.NoError(t, c.Checkout(context.Background(), repo, sha2, ws))
+		sub := filepath.Join(ws, "sub")
+		require.NoError(t, os.Mkdir(sub, 0o755)) // empty: git status stays clean
+
+		err := c.Checkout(context.Background(), repo, sha2, sub)
+		require.ErrorIs(t, err, ports.ErrCheckoutConflict)
+	})
+	t.Run("the repository's main worktree", func(t *testing.T) {
+		repo, _, sha2 := setupRepo(t)
+
+		err := Checkout{}.Checkout(context.Background(), repo, sha2, repo)
+		require.ErrorIs(t, err, ports.ErrCheckoutConflict)
+	})
+}
+
+// A repo or workspace path reached through a symlink names the same
+// repository; reuse must compare resolved paths.
+func TestCheckout_ReuseThroughSymlinkedPaths(t *testing.T) {
+	repo, _, sha2 := setupRepo(t)
+	links := t.TempDir()
+	repoLink := filepath.Join(links, "repo")
+	require.NoError(t, os.Symlink(repo, repoLink))
+	realRoot := t.TempDir()
+	rootLink := filepath.Join(links, "root")
+	require.NoError(t, os.Symlink(realRoot, rootLink))
+	ws := filepath.Join(rootLink, "ws")
+	c := Checkout{}
+
+	require.NoError(t, c.Checkout(context.Background(), repoLink, sha2, ws))
+	require.NoError(t, c.Checkout(context.Background(), repoLink, sha2, ws), "a retry must reuse the worktree")
+	require.NoError(t, c.Checkout(context.Background(), repo, sha2, ws), "the resolved repo path is the same repo")
+}

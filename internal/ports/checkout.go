@@ -6,7 +6,7 @@ import (
 )
 
 // Checkout prepares a workspace as a pinned, detached git worktree at
-// exactly sha (ADR-0006 D5, D6). Implementations must run every git
+// exactly sha (ADR-0006 §2). Implementations must run every git
 // invocation with repository hooks disabled — a pinned, otherwise-untrusted
 // commit must never run code from its own tree during checkout.
 type Checkout interface {
