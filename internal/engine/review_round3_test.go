@@ -3,14 +3,19 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
 
+	"github.com/Benja272/tollgate/internal/adapters/postgres"
 	"github.com/Benja272/tollgate/internal/ports"
 )
 
@@ -145,4 +150,118 @@ func failurePayloadSize(t *testing.T, err error) int {
 	data, marshalErr := failure.Marshal()
 	require.NoError(t, marshalErr)
 	return len(data)
+}
+
+// recordingLedger captures what RecordCosts hands the ledger.
+type recordingLedger struct {
+	mu      sync.Mutex
+	entries []ports.CostEntry
+	err     error
+}
+
+func (l *recordingLedger) RecordCosts(_ context.Context, entries []ports.CostEntry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return l.err
+	}
+	l.entries = append(l.entries, entries...)
+	return nil
+}
+
+func (l *recordingLedger) recorded() []ports.CostEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]ports.CostEntry(nil), l.entries...)
+}
+
+// A deploy can resume a job whose RecordCosts input was journaled before
+// run ids existed: that input carries no run id at all. The ledger rejects
+// such a row, RecordCosts runs under an unlimited retry policy, and the job
+// would retry forever. The run that scheduled the activity is the run that
+// paid, which is exactly what the pre-change code keyed rows by.
+func TestActivities_RecordCosts_EntryWithoutRunID_KeyedByTheRunningExecution(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+
+	ledger := &recordingLedger{}
+	acts := &Activities{Ledger: ledger}
+	env.RegisterActivity(acts.RecordCosts)
+	env.RegisterActivityWithOptions(
+		func(ctx context.Context) (string, error) { return activityRunID(ctx), nil },
+		activity.RegisterOptions{Name: "reportRunID"},
+	)
+
+	val, err := env.ExecuteActivity("reportRunID")
+	require.NoError(t, err)
+	var wantRunID string
+	require.NoError(t, val.Get(&wantRunID))
+	require.NotEmpty(t, wantRunID)
+
+	_, err = env.ExecuteActivity(acts.RecordCosts, []ports.CostEntry{{
+		JobID: "job-legacy", Phase: "run_agent", Actor: "agent", Model: "m", USD: 0.5, Attempt: 1,
+	}})
+	require.NoError(t, err, "a legacy entry must be recorded, not retried forever")
+
+	got := ledger.recorded()
+	require.Len(t, got, 1)
+	require.Equal(t, wantRunID, got[0].RunID, "the row is keyed by the execution that scheduled it")
+}
+
+func TestActivities_RecordCosts_ReportedRunID_IsNeverOverwritten(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+
+	ledger := &recordingLedger{}
+	acts := &Activities{Ledger: ledger}
+	env.RegisterActivity(acts.RecordCosts)
+
+	_, err := env.ExecuteActivity(acts.RecordCosts, []ports.CostEntry{{
+		JobID: "job-reset", RunID: "the-run-that-paid", Phase: "run_agent", Actor: "agent", USD: 0.5, Attempt: 1,
+	}})
+	require.NoError(t, err)
+
+	got := ledger.recorded()
+	require.Len(t, got, 1)
+	require.Equal(t, "the-run-that-paid", got[0].RunID,
+		"a row already keyed by the paying run must survive a reset unchanged")
+}
+
+// The ledger keeps its own check: outside an activity there is no execution
+// to fall back to, and a row without a run id must still be refused.
+func TestActivities_RecordCosts_OutsideAnActivity_LedgerStillRejects(t *testing.T) {
+	ledger := &recordingLedger{err: errors.New("ledger: cost entry has no run id")}
+	acts := &Activities{Ledger: ledger}
+
+	err := acts.RecordCosts(context.Background(), []ports.CostEntry{{JobID: "j", Phase: "run_agent", Actor: "agent"}})
+
+	require.Error(t, err)
+}
+
+// The same legacy entry against the real ledger: before the fill, the
+// ledger refused the row with ErrMissingRunID and the activity — whose
+// retry policy is Temporal's unlimited default — never stopped trying.
+func TestActivities_RecordCosts_EntryWithoutRunID_RealLedgerRecordsIt(t *testing.T) {
+	ledger := postgres.NewLedger(ledgerPoolOrSkip(t))
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+	acts := &Activities{Ledger: ledger}
+	env.RegisterActivity(acts.RecordCosts)
+
+	piece := fmt.Sprintf("piece-legacy-runid-%d", time.Now().UnixNano())
+	_, err := env.ExecuteActivity(acts.RecordCosts, []ports.CostEntry{{
+		JobID:   fmt.Sprintf("job-legacy-%d", time.Now().UnixNano()),
+		Phase:   "run_agent",
+		Actor:   "agent",
+		Model:   "claude-haiku-4-5",
+		PieceID: piece,
+		USD:     0.5,
+		Attempt: 1,
+	}})
+	require.NoError(t, err, "a pre-change RecordCosts input must be recorded, not rejected forever")
+
+	spend, spendErr := ledger.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, spendErr)
+	require.Len(t, spend, 1)
+	require.InDelta(t, 0.5, spend[0].USD, 1e-9)
 }

@@ -496,8 +496,27 @@ func (a *Activities) DecideGate(ctx context.Context, in DecideInput) (gate.Decis
 // RecordCosts persists ledger entries. It is deliberately its own activity:
 // a paid call and a cheap retryable write must never share one, or a
 // failed write would re-run — and re-bill — the paid call.
+//
+// An entry with no run id is one a pre-run-id worker journaled (ADR-0006
+// §9): a deploy resumes those inputs on a worker whose ledger refuses a
+// blank key, under the default unlimited retry policy, so the job would
+// retry forever. The run that scheduled this activity is the run that paid
+// — exactly what the pre-change code keyed rows by — so it is filled in
+// here. A reported run id is never overwritten: after a reset it names the
+// earlier execution that actually paid. The ledger keeps its own check as
+// the backstop for a caller with no execution behind it.
 func (a *Activities) RecordCosts(ctx context.Context, entries []ports.CostEntry) error {
-	return a.Ledger.RecordCosts(ctx, entries)
+	filled := entries
+	if runID := activityRunID(ctx); runID != "" {
+		filled = make([]ports.CostEntry, len(entries))
+		copy(filled, entries)
+		for i := range filled {
+			if filled[i].RunID == "" {
+				filled[i].RunID = runID
+			}
+		}
+	}
+	return a.Ledger.RecordCosts(ctx, filled)
 }
 
 // Ship is scaffolding: PR creation needs an idempotency design first
