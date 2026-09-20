@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/Benja272/tollgate/internal/ports"
 )
@@ -372,6 +373,11 @@ func checkExisting(workspace, rel string, want entryKind) error {
 		info, err := os.Lstat(cur)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
+		}
+		if errors.Is(err, syscall.ENAMETOOLONG) {
+			// A name the filesystem cannot even hold is a destination this
+			// overlay can never write; retrying changes nothing.
+			return fmt.Errorf("%w: %s is too long a name for this filesystem", ErrDestinationConflict, cur)
 		}
 		if err != nil {
 			return fmt.Errorf("workspace: lstat %s: %w", cur, err)

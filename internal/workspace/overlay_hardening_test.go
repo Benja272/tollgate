@@ -324,6 +324,9 @@ func TestApply_DestinationConflicts_RejectedBeforeWriting(t *testing.T) {
 		"name too long for its temp name": {func(t *testing.T, ws, src string) []Overlay {
 			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/" + longName}}
 		}},
+		"directory name too long to exist": {func(t *testing.T, ws, src string) []Overlay {
+			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/" + strings.Repeat("d", 256) + "/x"}}
+		}},
 		"directory at the temp name": {func(t *testing.T, ws, src string) []Overlay {
 			require.NoError(t, os.MkdirAll(filepath.Join(ws, "output", ".x"+tmpSuffix), 0o755))
 			return []Overlay{{Source: fileIn(t, src, "x"), Dest: "output/x"}}
