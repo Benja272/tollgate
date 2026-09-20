@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +30,13 @@ const stderrTailBytes = 2048
 // output beyond this means something other than the CLI is writing, and the
 // run's cost can no longer be trusted.
 const defaultStdoutCap = 64 << 20
+
+// maxErrorResultBytes bounds how much of the harness's own reported result
+// text travels inside a run error's message. The cap is far below the
+// stdout cap on purpose: a billed failure exists to carry the COST, and its
+// message crosses process boundaries where a multi-megabyte string is
+// rejected outright (ADR-0006 §8).
+const maxErrorResultBytes = 2048
 
 // Runner shells the Claude Code CLI. Bin is the binary to invoke, normally
 // "claude"; tests point it at a fake. WaitDelay overrides defaultWaitDelay.
@@ -229,7 +237,7 @@ func classifyRun(ctx context.Context, runErr error, stdout *cappedBuffer, stderr
 		case env.IsError:
 			return ports.RunResult{}, &ports.RunError{
 				Result: result,
-				Err:    fmt.Errorf("claude code reported error: %s", env.Result),
+				Err:    fmt.Errorf("claude code reported error: %s", truncateText(env.Result, maxErrorResultBytes)),
 			}
 		}
 		return result, nil
@@ -319,6 +327,17 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 		b.buf = append(b.buf[:0], b.buf[over:]...)
 	}
 	return len(p), nil
+}
+
+// truncateText bounds s for an error message, saying explicitly how much
+// was dropped. Bytes cut mid-rune are removed, so the message stays valid
+// UTF-8 for whatever encodes it downstream.
+func truncateText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	kept := strings.ToValidUTF8(s[:max], "")
+	return fmt.Sprintf("%s [truncated to %d of %d bytes]", kept, len(kept), len(s))
 }
 
 // suffix renders the tail for an error message, empty when there is none.

@@ -446,3 +446,18 @@ func TestRunner_Run_ContextDoneBeforeStart_NotStartedNotUnmetered(t *testing.T) 
 	_, statErr := os.Stat(filepath.Join(workspace, "ran"))
 	assert.True(t, os.IsNotExist(statErr))
 }
+
+// A billed failure's message carries what the CLI reported. A harness that
+// wrote megabytes into `result` would otherwise put every one of those
+// bytes into the error the engine hands to Temporal.
+func TestRunner_Run_BilledFailureWithHugeResult_ErrorMessageIsBounded(t *testing.T) {
+	bin := fakeClaude(t, `printf '{"type":"result","is_error":true,"total_cost_usd":0.07,"result":"'; head -c 3000000 /dev/zero | tr '\0' 'x'; printf '"}\n'`)
+
+	_, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: t.TempDir(), Prompt: "p"})
+
+	var billed *ports.RunError
+	require.ErrorAs(t, err, &billed)
+	assert.InDelta(t, 0.07, billed.Result.CostUSD, 1e-9, "the cost is what this failure exists to carry")
+	assert.Less(t, len(err.Error()), 64<<10, "a billed failure's message must stay small enough to travel")
+	assert.Contains(t, err.Error(), "truncated")
+}

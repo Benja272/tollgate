@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -67,6 +68,58 @@ const (
 	// run on this operating system.
 	errTypeUnsupportedPlatform = "UnsupportedPlatform"
 )
+
+// Temporal rejects an activity result, or a failure, whose payload is over
+// the server's blob size limit (2 MiB by default) and fails the attempt as
+// if the activity itself had failed: the agent's spend is never recorded
+// and the run — already paid for — is retried. So RunAgent bounds
+// everything it hands back. The caps are far below the limit: what the
+// engine needs from a run is its COST, and the output is context.
+const (
+	// maxAgentOutputBytes bounds the agent output an AgentResult carries.
+	// In JobWorkflow that output is also the judges' input, so the bound
+	// applies to both job shapes' payloads.
+	maxAgentOutputBytes = 256 << 10
+	// maxAgentFailureBytes bounds every message a failure contributes: the
+	// failure converter serializes the message of each error down the cause
+	// chain, so one oversized cause is enough to lose the whole failure.
+	maxAgentFailureBytes = 8 << 10
+)
+
+// truncateForPayload bounds s, stating explicitly what was dropped so no
+// reader mistakes a truncated output for the whole one. Bytes cut mid-rune
+// are removed, keeping the result valid UTF-8 for whatever encodes it.
+func truncateForPayload(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	kept := strings.ToValidUTF8(s[:max], "")
+	return fmt.Sprintf("%s\n[tollgate: truncated to %d of %d bytes]", kept, len(kept), len(s))
+}
+
+// boundedError carries a truncated message while keeping the sentinel
+// identity of the error it stands in for, so asNonRetryable still maps it.
+// It deliberately does NOT implement Unwrap: the failure converter walks
+// the cause chain message by message, and keeping the original there would
+// put back the very bytes this bounds.
+type boundedError struct {
+	msg      string
+	original error
+}
+
+func (e *boundedError) Error() string { return e.msg }
+
+func (e *boundedError) Is(target error) bool { return errors.Is(e.original, target) }
+
+// boundFailure returns err unchanged when its message already fits a
+// Temporal failure, and a bounded stand-in when it does not.
+func boundFailure(err error) error {
+	msg := err.Error()
+	if len(msg) <= maxAgentFailureBytes {
+		return err
+	}
+	return &boundedError{msg: truncateForPayload(msg, maxAgentFailureBytes), original: err}
+}
 
 // nonRetryable is one sentinel-to-type mapping for asNonRetryable.
 type nonRetryable struct {
@@ -251,18 +304,19 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 		// payloads are bounded by Temporal's size limit.
 		details := AgentResult{CostUSD: res.CostUSD, Usage: res.Usage, Model: res.Model, PaidByRunID: activityRunID(ctx)}
 		return AgentResult{}, temporal.NewNonRetryableApplicationError(
-			billedErr.Error(), errTypeAgentRunBilled, nil, details)
+			boundFailure(billedErr).Error(), errTypeAgentRunBilled, nil, details)
 	case errors.As(err, &unmeteredErr):
 		errType := errTypeAgentRunUnmetered
 		if errors.Is(err, ports.ErrAmbiguousEnvelope) {
 			errType = errTypeAgentRunAmbiguousEnvelope
 		}
+		bounded := boundFailure(err)
 		activityLogger(ctx).Error("unmetered agent run: its cost is unknown; not retried",
-			"job_id", in.JobID, "attempt", in.Attempt, "type", errType, "error", err)
+			"job_id", in.JobID, "attempt", in.Attempt, "type", errType, "error", bounded)
 		a.Telemetry.RecordUnmeteredRun(ctx, call)
-		return AgentResult{}, temporal.NewNonRetryableApplicationError(err.Error(), errType, err)
+		return AgentResult{}, temporal.NewNonRetryableApplicationError(bounded.Error(), errType, bounded)
 	default:
-		return AgentResult{}, asNonRetryable(err,
+		return AgentResult{}, asNonRetryable(boundFailure(err),
 			nonRetryable{ports.ErrInvalidAgentConfig, errTypeInvalidAgentConfig},
 			nonRetryable{errors.ErrUnsupported, errTypeUnsupportedPlatform},
 		)
@@ -275,7 +329,8 @@ func (a *Activities) RunAgent(ctx context.Context, in RunAgentInput) (AgentResul
 			"job_id", in.JobID, "attempt", in.Attempt)
 	}
 	return AgentResult{
-		CostUSD: res.CostUSD, Usage: res.Usage, Output: res.Output, Model: res.Model,
+		CostUSD: res.CostUSD, Usage: res.Usage, Model: res.Model,
+		Output:      truncateForPayload(res.Output, maxAgentOutputBytes),
 		PaidByRunID: activityRunID(ctx),
 	}, nil
 }

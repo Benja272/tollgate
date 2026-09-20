@@ -339,3 +339,77 @@ printf '{"type":"result","is_error":false,"total_cost_usd":%s,"result":"ok","mod
 	require.Equal(t, "claude-haiku-4-5", spend[0].Model)
 	require.InDelta(t, 1.30, spend[0].USD, 1e-9, "both executions' spend must be in the ledger")
 }
+
+// TestArtifactJobWorkflow_E2E_OversizedAgentResult_OneInvocationOneRow is
+// the third-review F1 scenario on a real server: the harness reports a
+// result far above Temporal's payload limit. The run is paid work, so it
+// must be invoked exactly once and its cost must land exactly once — an
+// oversized activity result would instead fail the attempt and re-invoke
+// the agent.
+func TestArtifactJobWorkflow_E2E_OversizedAgentResult_OneInvocationOneRow(t *testing.T) {
+	c := dialOrSkip(t)
+	defer c.Close()
+
+	repo, sha := e2eGitRepo(t)
+	workspaceRoot := t.TempDir()
+	overlaySrc := filepath.Join(t.TempDir(), "plan.md")
+	require.NoError(t, os.WriteFile(overlaySrc, []byte("the plan"), 0o644))
+
+	invocations := filepath.Join(t.TempDir(), "invocations")
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	script := `#!/bin/sh
+echo x >> "` + invocations + `"
+printf '{"type":"result","is_error":false,"total_cost_usd":0.55,"result":"'
+head -c 2500000 /dev/zero | tr '\0' 'x'
+printf '","modelUsage":{"claude-haiku-4-5":{"costUSD":0.55}}}\n'
+`
+	require.NoError(t, os.WriteFile(claudeBin, []byte(script), 0o755))
+
+	ledger := &e2eFakeLedger{}
+	acts := &Activities{
+		Agent:             &claudecode.Runner{Bin: claudeBin},
+		Checkout:          gitcli.Checkout{},
+		Ledger:            ledger,
+		WorkspaceRoot:     workspaceRoot,
+		HeartbeatInterval: time.Hour,
+	}
+
+	taskQueue := fmt.Sprintf("tollgate-artifact-e2e-oversized-%d", time.Now().UnixNano())
+	w := e2eWorker(t, c, taskQueue, acts)
+	defer w.Stop()
+
+	jobID := fmt.Sprintf("e2e-oversized-%d", time.Now().UnixNano())
+	in := ArtifactJobInput{
+		JobID:            jobID,
+		PieceID:          "piece-e2e-oversized",
+		Repo:             repo,
+		SourceRef:        sha,
+		Prompt:           "render the piece",
+		AgentConfig:      json.RawMessage(`{"model":"haiku"}`),
+		DestinationRoots: []string{"output"},
+		Overlays:         []workspace.Overlay{{Source: overlaySrc, Dest: "output/plan.md"}},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID: "artifact-" + jobID, TaskQueue: taskQueue,
+	}, ArtifactJobWorkflow, in)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = c.TerminateWorkflow(context.Background(), "artifact-"+jobID, "", "test cleanup")
+	})
+
+	var result ArtifactJobResult
+	require.NoError(t, run.Get(ctx, &result), "an oversized agent result must not fail the job")
+	require.InDelta(t, 0.55, result.CostUSD, 1e-9)
+	require.Contains(t, result.Output, "truncated")
+
+	ran, readErr := os.ReadFile(invocations)
+	require.NoError(t, readErr)
+	require.Equal(t, 1, strings.Count(string(ran), "x"), "the agent must be invoked exactly once")
+
+	entries := ledger.recorded()
+	require.Len(t, entries, 1, "exactly one cost row for one paid run")
+	require.InDelta(t, 0.55, entries[0].USD, 1e-9)
+}
