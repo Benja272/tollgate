@@ -358,3 +358,15 @@ func TestCheckout_WorktreeAddTerminatesOptionsBeforeThePath(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(raw), "worktree add --detach -- "+ws+" "+sha2)
 }
+
+// A relative workspace path is refused before any git runs: the path is
+// handed to git, where "-x" or a path relative to an unknown working
+// directory could even read as an option.
+func TestCheckout_RelativeWorkspacePath_Refused(t *testing.T) {
+	repo, sha, _ := setupRepo(t)
+
+	err := Checkout{}.Checkout(context.Background(), repo, sha, filepath.Join("relative", "workspace"))
+
+	require.ErrorIs(t, err, ports.ErrCheckoutConflict)
+	require.NoDirExists(t, filepath.Join("relative", "workspace"))
+}
