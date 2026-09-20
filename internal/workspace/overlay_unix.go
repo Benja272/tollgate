@@ -149,11 +149,8 @@ func (w *writer) writeFile(f plannedFile) error {
 	if err := out.Chmod(f.perm); err != nil {
 		return fail("chmod temp file for", err)
 	}
-	if err := out.Sync(); err != nil {
+	if err := fsyncFile(out, f.dest); err != nil {
 		return fail("fsync temp file for", err)
-	}
-	if syncedFileHook != nil {
-		syncedFileHook(f.dest)
 	}
 	if err := out.Close(); err != nil {
 		_ = unix.Unlinkat(dirFD, tmp, 0)
@@ -202,14 +199,35 @@ func (w *writer) syncDirs() error {
 		if err != nil {
 			return err
 		}
-		syncErr := unix.Fsync(fd)
+		syncErr := fsyncDir(fd, d)
 		_ = unix.Close(fd)
 		if syncErr != nil {
 			return fmt.Errorf("workspace: fsync dir %s: %w", d, syncErr)
 		}
-		if syncedDirHook != nil {
-			syncedDirHook(d)
-		}
+	}
+	return nil
+}
+
+// fsyncDir makes the directory behind fd durable, and fsyncFile the file
+// behind f. Each observation hook fires INSIDE the call that syncs, never
+// after it: a test that watches durability must fail when the sync itself
+// is gone, not only when the hook is.
+func fsyncDir(fd int, rel string) error {
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	if syncedDirHook != nil {
+		syncedDirHook(rel)
+	}
+	return nil
+}
+
+func fsyncFile(f *os.File, rel string) error {
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if syncedFileHook != nil {
+		syncedFileHook(rel)
 	}
 	return nil
 }

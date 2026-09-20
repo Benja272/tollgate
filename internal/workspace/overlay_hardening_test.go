@@ -408,6 +408,25 @@ func TestApply_SourceSwappedAfterPrecheck_Refused(t *testing.T) {
 	})
 }
 
+// A conflict that only appears between the pre-check and the write is
+// still permanent, and the write path — not the pre-check — has to say so.
+// Emptying conflictErrnos must fail this test.
+func TestApply_DestinationTurnedIntoAFileAfterPrecheck_IsAConflict(t *testing.T) {
+	ws, _ := engineFixture(t)
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "a"), "a", 0o644)
+	plantAfterPrecheck(t, func() {
+		writeFile(t, filepath.Join(ws, "output", "c"), "planted", 0o644)
+	})
+
+	err := Apply(context.Background(), ws, []string{"output"}, []Overlay{{Source: src, Dest: "output/c"}}, nil)
+
+	require.ErrorIs(t, err, ErrDestinationConflict)
+	got, readErr := os.ReadFile(filepath.Join(ws, "output", "c"))
+	require.NoError(t, readErr)
+	require.Equal(t, "planted", string(got), "the planted entry must not be written through")
+}
+
 func TestApply_EveryFileFsyncedBeforeRename(t *testing.T) {
 	ws, _ := engineFixture(t)
 	src := t.TempDir()
