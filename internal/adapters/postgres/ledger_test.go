@@ -33,11 +33,11 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 func entriesFor(jobID string) []ports.CostEntry {
 	return []ports.CostEntry{
-		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.772445, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 10, OutputTokens: 84, CacheReadTokens: 18282, CacheCreationTokens: 23716}},
-		{JobID: jobID, Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "judge", Actor: "judge:sonnet", Model: "sonnet", USD: 0.255358, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 60}},
-		{JobID: jobID, Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1,
+		{JobID: jobID, RunID: "run-1", Phase: "judge", Actor: "judge:haiku", Model: "haiku", USD: 0.055145, Attempt: 1,
 			Usage: ports.TokenUsage{InputTokens: 500, OutputTokens: 55}},
 	}
 }
@@ -68,6 +68,74 @@ func TestLedger_RecordCosts_PersistsAndAggregates(t *testing.T) {
 	require.Equal(t, int64(23716), cacheCreate)
 }
 
+func TestLedger_RecordCosts_PieceIDGiven_RecordedOnEveryRow(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-piece-%d", time.Now().UnixNano())
+	entries := entriesFor(jobID)
+	for i := range entries {
+		entries[i].PieceID = "piece-77"
+	}
+	require.NoError(t, l.RecordCosts(context.Background(), entries))
+
+	rows, err := pool.Query(context.Background(), `SELECT piece_id FROM cost_entries WHERE job_id = $1`, jobID)
+	require.NoError(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var pieceID string
+		require.NoError(t, rows.Scan(&pieceID))
+		require.Equal(t, "piece-77", pieceID)
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 3, count)
+}
+
+func TestLedger_RecordCosts_PieceIDOmitted_NullOnEveryRow(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-nopiece-%d", time.Now().UnixNano())
+	require.NoError(t, l.RecordCosts(context.Background(), entriesFor(jobID)))
+
+	rows, err := pool.Query(context.Background(), `SELECT piece_id FROM cost_entries WHERE job_id = $1`, jobID)
+	require.NoError(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var pieceID *string
+		require.NoError(t, rows.Scan(&pieceID))
+		require.Nil(t, pieceID, "piece_id must be NULL, not an empty string, when omitted")
+		count++
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 3, count)
+}
+
+func TestLedger_PerPieceSpend_SumsAcrossJobsIncludingFailed(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	piece := fmt.Sprintf("piece-spend-%d", time.Now().UnixNano())
+
+	// job3 simulates a job that failed after the agent ran: only its
+	// run_agent row exists, no judge rows — spend must still include it.
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job1", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 1.0, Attempt: 1, PieceID: piece},
+	}))
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job2", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 2.0, Attempt: 1, PieceID: piece},
+	}))
+	require.NoError(t, l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: piece + "-job3", RunID: "r", Phase: "run_agent", Actor: "agent", Model: "sonnet", USD: 0.5, Attempt: 1, PieceID: piece},
+	}))
+
+	spend, err := l.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, err)
+	require.Len(t, spend, 1)
+	require.Equal(t, "sonnet", spend[0].Model)
+	require.InDelta(t, 3.5, spend[0].USD, 1e-9, "per-piece spend must include the failed job's recorded row")
+}
+
 func TestLedger_RecordCosts_IsIdempotent(t *testing.T) {
 	pool := testPool(t)
 	l := NewLedger(pool)
@@ -81,4 +149,52 @@ func TestLedger_RecordCosts_IsIdempotent(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
 	require.Equal(t, 3, rows, "a retried write must never double-count money")
+}
+
+// Re-running a piece under the same JobID is a primary use case (model A/B
+// comparison). Each Temporal execution bills separately, so each keeps its
+// row; the natural key used to collapse them and drop the second run's
+// spend (review B8, reproduced).
+func TestLedger_SameJobIDTwoExecutions_BothRowsKept(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	piece := fmt.Sprintf("piece-rerun-%d", time.Now().UnixNano())
+	jobID := piece + "-render"
+	row := func(runID string, usd float64) []ports.CostEntry {
+		return []ports.CostEntry{{JobID: jobID, RunID: runID, Phase: "run_agent", Actor: "agent",
+			Model: "claude-haiku-4-5", USD: usd, Attempt: 1, PieceID: piece}}
+	}
+
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-a", 0.50)))
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-b", 0.80)))
+	require.NoError(t, l.RecordCosts(context.Background(), row("run-b", 0.80)),
+		"a retried write within one execution must stay idempotent")
+
+	var rows int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
+	require.Equal(t, 2, rows, "one row per execution, no duplicate per retry")
+
+	spend, err := l.PerPieceSpend(context.Background(), piece)
+	require.NoError(t, err)
+	require.Len(t, spend, 1)
+	require.InDelta(t, 1.30, spend[0].USD, 1e-9, "per-piece spend must be the sum of both executions")
+}
+
+// A new row without a run id would silently collapse executions again;
+// only rows written before run_id existed may carry ”.
+func TestLedger_RecordCosts_EmptyRunID_Rejected(t *testing.T) {
+	pool := testPool(t)
+	l := NewLedger(pool)
+	jobID := fmt.Sprintf("ledger-norun-%d", time.Now().UnixNano())
+
+	err := l.RecordCosts(context.Background(), []ports.CostEntry{
+		{JobID: jobID, Phase: "run_agent", Actor: "agent", Model: "m", USD: 0.1, Attempt: 1},
+	})
+
+	require.ErrorIs(t, err, ErrMissingRunID)
+	var rows int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM cost_entries WHERE job_id = $1`, jobID).Scan(&rows))
+	require.Zero(t, rows)
 }

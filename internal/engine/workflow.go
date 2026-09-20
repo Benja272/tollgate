@@ -4,6 +4,8 @@
 package engine
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -91,13 +93,116 @@ type RunAgentInput struct {
 	Workspace Workspace
 	Prompt    string
 	Attempt   int32
+	// AgentConfig is opaque to the engine (ADR-0002); it crosses to the
+	// adapter unchanged via ports.RunSpec. Empty for JobWorkflow (today's
+	// PR-shape arguments, unchanged); set for ArtifactJobWorkflow.
+	AgentConfig json.RawMessage
 }
 
-// AgentResult is the adapter-normalized outcome of one agent run.
+// AgentResult is the adapter-normalized outcome of one agent run. Model is
+// the resolved model id (ADR-0006 §7); it rides on both success and on a
+// billed failure's error details, since either way a ledger row needs it.
+// Output is left empty in those details to keep failure payloads small.
 type AgentResult struct {
 	CostUSD float64
 	Usage   ports.TokenUsage
 	Output  string
+	Model   string
+	// PaidByRunID is the Temporal run id of the execution whose activity
+	// made the paid call. The cost row is keyed by it, not by the run that
+	// writes the row: after a workflow reset the new run re-issues
+	// RecordCosts for a call an earlier run paid for (ADR-0006 §9).
+	PaidByRunID string
+}
+
+// errTypeAgentRunBilled is the temporal.ApplicationError.Type() RunAgent
+// reports when the harness produced a parseable result envelope before
+// failing (ADR-0006 §8): the run was billed, so its cost row must be
+// recorded before the job fails. Any other error carries no reported cost,
+// so nothing is recorded; an AgentRunUnmetered error says the run may still
+// have billed an unknown amount.
+const errTypeAgentRunBilled = "AgentRunBilled"
+
+// runAgentAndRecord runs the agent and journals its cost row, on success AND
+// on a billed failure (ADR-0006 §8). It is shared between JobWorkflow and
+// ArtifactJobWorkflow so the billed-failure accounting fix applies to both
+// job shapes identically. agentCtx carries the agent's own activity options
+// (heartbeat, retry policy); ctx carries the cheaper RecordCosts write.
+//
+// On success: records the row, returns the result.
+// On an AgentRunBilled application error: extracts the partial AgentResult
+// from the error's details, records that row, then returns the error
+// unchanged (still non-retryable) — the row is guaranteed to be recorded
+// before this function returns the error. If the details cannot be decoded
+// or the row cannot be written, the returned error says the spend was NOT
+// recorded and wraps both causes.
+// On any other error (no reported cost): records nothing and returns the
+// error unchanged.
+func runAgentAndRecord(agentCtx, ctx workflow.Context, run RunAgentInput, actor, pieceID string) (AgentResult, error) {
+	var acts *Activities
+
+	var agent AgentResult
+	err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, run).Get(agentCtx, &agent)
+	if err == nil {
+		if recErr := recordAgentCost(ctx, run, actor, pieceID, agent); recErr != nil {
+			return AgentResult{}, recErr
+		}
+		return agent, nil
+	}
+
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != errTypeAgentRunBilled {
+		return AgentResult{}, err
+	}
+	var billed AgentResult
+	if detailsErr := appErr.Details(&billed); detailsErr != nil {
+		workflow.GetLogger(ctx).Error("billed agent run has undecodable cost details; spend NOT recorded",
+			"job_id", run.JobID, "attempt", run.Attempt, "error", detailsErr)
+		return AgentResult{}, billedUnrecorded(fmt.Sprintf("cannot decode its cost details: %v", detailsErr), err)
+	}
+	if recErr := recordAgentCost(ctx, run, actor, pieceID, billed); recErr != nil {
+		workflow.GetLogger(ctx).Error("billed agent run could not be recorded; spend NOT recorded",
+			"job_id", run.JobID, "attempt", run.Attempt, "error", recErr)
+		return AgentResult{}, billedUnrecorded(fmt.Sprintf("ledger write failed: %v", recErr), err)
+	}
+	return AgentResult{}, err
+}
+
+// errTypeAgentRunBilledUnrecorded marks a billed run whose cost row could
+// not be written. The job fails loudly: the ledger is missing money.
+const errTypeAgentRunBilledUnrecorded = "AgentRunBilledUnrecorded"
+
+// billedUnrecorded reports both failures of a billed run whose row was not
+// written. Temporal's failure converter keeps a single cause chain, so the
+// agent's AgentRunBilled error is the cause and the recording failure is in
+// the message.
+func billedUnrecorded(why string, agentErr error) error {
+	return temporal.NewNonRetryableApplicationError(
+		"billed agent run: spend NOT recorded: "+why, errTypeAgentRunBilledUnrecorded, agentErr)
+}
+
+// recordAgentCost journals one run_agent cost row. pieceID is empty for
+// JobWorkflow and set for ArtifactJobWorkflow; ports.CostEntry stores it
+// outside the natural key (ADR-0006 §9).
+func recordAgentCost(ctx workflow.Context, run RunAgentInput, actor, pieceID string, agent AgentResult) error {
+	var acts *Activities
+	return workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
+		JobID: run.JobID, RunID: paidByRun(ctx, agent.PaidByRunID), Phase: "run_agent", Actor: actor, PieceID: pieceID,
+		Model: agent.Model, Usage: agent.Usage, USD: agent.CostUSD, Attempt: run.Attempt,
+	}}).Get(ctx, nil)
+}
+
+// paidByRun is the run id a cost row is keyed by: the run whose activity
+// paid, as the activity reported it. Results journaled before activities
+// reported it carry an empty value; those fall back to the current run,
+// which is the run that paid unless the workflow was reset in between
+// (ADR-0006 §9). Both values come from the journal, so replay reproduces
+// them.
+func paidByRun(ctx workflow.Context, reported string) string {
+	if reported != "" {
+		return reported
+	}
+	return workflow.GetInfo(ctx).WorkflowExecution.RunID
 }
 
 // ShipResult reports the PR created for a passing job.
@@ -161,20 +266,13 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 			actor = "agent"
 		}
 
-		var agent AgentResult
-		if err := workflow.ExecuteActivity(agentCtx, acts.RunAgent, RunAgentInput{
+		agent, err := runAgentAndRecord(agentCtx, ctx, RunAgentInput{
 			JobID: in.JobID, Workspace: ws, Prompt: prompt, Attempt: attempt,
-		}).Get(agentCtx, &agent); err != nil {
+		}, actor, "")
+		if err != nil {
 			return JobResult{}, err
 		}
 		totalCost += agent.CostUSD
-
-		if err := workflow.ExecuteActivity(ctx, acts.RecordCosts, []ports.CostEntry{{
-			JobID: in.JobID, Phase: "run_agent", Actor: actor,
-			Usage: agent.Usage, USD: agent.CostUSD, Attempt: attempt,
-		}}).Get(ctx, nil); err != nil {
-			return JobResult{}, err
-		}
 
 		// One activity per judge, all in flight at once: each judgment is
 		// journaled, retried, and costed independently (ADR-0003).
@@ -198,7 +296,7 @@ func JobWorkflow(ctx workflow.Context, in JobInput) (JobResult, error) {
 			verdicts[i] = judgment.Verdict
 			totalCost += judgment.CostUSD
 			judgeEntries[i] = ports.CostEntry{
-				JobID: in.JobID, Phase: "judge", Actor: "judge:" + models[i],
+				JobID: in.JobID, RunID: paidByRun(ctx, judgment.PaidByRunID), Phase: "judge", Actor: "judge:" + models[i],
 				Model: models[i], Usage: judgment.Usage, USD: judgment.CostUSD, Attempt: attempt,
 			}
 		}

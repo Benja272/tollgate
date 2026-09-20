@@ -1,0 +1,73 @@
+# Agent Run Config Specification
+
+## Purpose
+
+Defines the per-adapter agent configuration (model, tool allowlist) and its translation into headless CLI flags, without ever enabling a bypass mode.
+
+## Requirements
+
+### Requirement: Model and Allowlist Reach the CLI
+
+The adapter MUST translate the requested model and tool allowlist from `AgentConfig` into the headless CLI invocation.
+
+#### Scenario: Configured model and allowlist are passed
+
+- GIVEN an `AgentConfig` naming a model and a tool allowlist
+- WHEN the adapter builds the CLI command
+- THEN the command includes that model and that allowlist
+
+### Requirement: No Bypass Permission Mode
+
+The adapter MUST NOT pass any bypass or skip-permissions flag, regardless of `AgentConfig` contents.
+
+#### Scenario: Bypass flag never present
+
+- GIVEN any valid `AgentConfig`, including one requesting broad tool access
+- WHEN the adapter builds the CLI command
+- THEN no bypass or skip-permissions flag is present in the command
+
+### Requirement: Prompt Is Never Parsed as a Flag
+
+The adapter MUST pass the prompt as the single operand after a `--` terminator placed after every flag, for every `AgentConfig`, including an empty one. A prompt starting with `-` is legitimate and MUST NOT be rejected. *(Added by the post-archive review, B5.)*
+
+#### Scenario: Dash-leading prompt stays an operand
+
+- GIVEN a prompt such as `--dangerously-skip-permissions` or a markdown list starting with `- `
+- WHEN the adapter builds the CLI command, with an empty or a non-empty `AgentConfig`
+- THEN the last two arguments are `--` and the prompt, and no argument before `--` is the prompt
+
+### Requirement: Config Values Are Validated, Never Rewritten
+
+The adapter MUST reject, before starting any process, an `AgentConfig` that has unknown fields or trailing data; a model with a leading `-`, whitespace or control characters; a `tools` entry that is empty, starts with `-`, or contains a comma, whitespace or a control character; or an `allowed_tools` entry that is empty, starts with `-`, contains a control character, has unbalanced parentheses, or has a comma or whitespace outside parentheses. `"tools": []` MUST produce `--tools ""` (no tools); an absent `tools` key MUST NOT emit `--tools`. *(Added by the post-archive review.)*
+
+#### Scenario: A separator cannot smuggle in a second rule
+
+- GIVEN an `allowed_tools` entry `Read,Bash` or `Read Bash`
+- WHEN the adapter validates the config
+- THEN it fails with an invalid-config error and no process starts
+
+### Requirement: Empty Config Compatibility
+
+With an empty `AgentConfig`, the adapter MUST build the minimal command: the same flags the adapter built before the artifact-jobs change, with the prompt moved behind the `--` terminator. *(Amended by the post-archive review: the pre-change argv, `-p <prompt> --output-format json`, let a dash-leading prompt parse as a flag.)*
+
+#### Scenario: Empty config builds the minimal command
+
+- GIVEN an empty `AgentConfig`
+- WHEN the adapter builds the CLI command
+- THEN the arguments are exactly `-p --output-format json -- <prompt>`
+
+### Requirement: Harness Processes Do Not Outlive the Run
+
+The adapter MUST kill every process the harness started when the run returns, for any outcome. Where the platform allows it, the adapter MUST do this before the harness's own process is reaped, and MUST make the harness die with the worker. *(Second round: R6.)* Making the harness die with the worker reaches the harness process ONLY: what it started survives a worker death. So a run MUST record its process group for its workspace, and a run MUST kill the group recorded for that workspace before it starts, then clear the record. *(Third round: F2.)*
+
+#### Scenario: A background process left by the agent is killed
+
+- GIVEN an agent run that leaves a background process, and that exits cleanly, fails, or reports no cost
+- WHEN the run returns
+- THEN that process is no longer running
+
+#### Scenario: A group left by a killed worker is killed by the next run
+
+- GIVEN a workspace whose previous run recorded a process group that is still alive, because the worker was killed before the run could return
+- WHEN a new run starts in that workspace
+- THEN the recorded group is killed before the harness starts, and the record is cleared

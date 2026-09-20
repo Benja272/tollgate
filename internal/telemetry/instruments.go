@@ -53,6 +53,9 @@ const (
 	MetricCostUSD    = "tollgate.cost.usd"
 	MetricJudgeScore = "tollgate.judge.score"
 	MetricTokenUsage = "gen_ai.client.token.usage"
+	// MetricUnmeteredRuns counts agent runs killed before they reported a
+	// cost (ADR-0006 §8): spend that exists but that no ledger row shows.
+	MetricUnmeteredRuns = "tollgate.agent.unmetered_runs"
 )
 
 // gen_ai.token.type is an open enum; the registry enumerates only input and
@@ -103,6 +106,11 @@ type Call struct {
 type Result struct {
 	Usage   ports.TokenUsage
 	CostUSD float64
+	// Model is the resolved model id (gen_ai.response.model), set when the
+	// call site only learns which model ran after the call completes — the
+	// coding-agent run, whose harness picks the model (ADR-0006 §7). Empty
+	// omits the attribute entirely rather than reporting an empty string.
+	Model string
 }
 
 // Instruments holds the tracer and the instruments every paid call records to.
@@ -111,6 +119,8 @@ type Instruments struct {
 	cost   metric.Float64Counter
 	tokens genaiconv.ClientTokenUsage
 	score  metric.Int64Histogram
+	// unmetered counts runs whose spend is unknown.
+	unmetered metric.Int64Counter
 
 	jobIDOnMetrics bool
 }
@@ -147,15 +157,20 @@ func New(tp trace.TracerProvider, mp metric.MeterProvider, opts ...Option) (*Ins
 		metric.WithDescription("Judge scores per rubric axis."),
 		metric.WithUnit("{score}"),
 	)
-	if err := errors.Join(costErr, tokensErr, scoreErr); err != nil {
+	unmetered, unmeteredErr := meter.Int64Counter(MetricUnmeteredRuns,
+		metric.WithDescription("Agent runs killed before reporting their cost; their spend is unrecorded."),
+		metric.WithUnit("{run}"),
+	)
+	if err := errors.Join(costErr, tokensErr, scoreErr, unmeteredErr); err != nil {
 		return nil, err
 	}
 
 	inst := &Instruments{
-		tracer: tp.Tracer(ScopeName),
-		cost:   cost,
-		tokens: tokens,
-		score:  score,
+		tracer:    tp.Tracer(ScopeName),
+		cost:      cost,
+		tokens:    tokens,
+		score:     score,
+		unmetered: unmetered,
 	}
 	for _, opt := range opts {
 		opt(inst)
@@ -196,10 +211,13 @@ func (i *Instruments) StartInvokeAgent(ctx context.Context, call Call) (context.
 	return ctx, &Recording{inst: i, call: call, span: span}
 }
 
-// End closes the span, recording usage and cost on success, or the error on
-// failure. A failed call reports no usage and no cost: nothing was billed that
-// the harness told us about, and inventing a zero-cost data point would dilute
-// the cost aggregates.
+// End closes the span. On success it records usage, cost and the resolved
+// model. On a billed failure — err wraps a *ports.RunError, whose result the
+// caller passes as res — it records the same usage, cost and model and also
+// marks the span as an error, so telemetry agrees with the ledger row
+// written for that run (ADR-0006 §8). Any other failure records only the
+// error: the harness reported no cost, and inventing a zero-cost data point
+// would dilute the cost aggregates.
 func (r *Recording) End(ctx context.Context, res Result, err error) {
 	if r == nil {
 		return
@@ -210,7 +228,10 @@ func (r *Recording) End(ctx context.Context, res Result, err error) {
 		r.span.RecordError(err)
 		r.span.SetStatus(codes.Error, err.Error())
 		r.span.SetAttributes(semconv.ErrorType(err))
-		return
+		var billed *ports.RunError
+		if !errors.As(err, &billed) {
+			return
+		}
 	}
 
 	r.span.SetAttributes(
@@ -220,6 +241,9 @@ func (r *Recording) End(ctx context.Context, res Result, err error) {
 		semconv.GenAIUsageCacheCreationInputTokens(int(res.Usage.CacheCreationTokens)),
 		AttrCostUSD.Float64(res.CostUSD),
 	)
+	if res.Model != "" {
+		r.span.SetAttributes(semconv.GenAIResponseModel(res.Model))
+	}
 	r.inst.record(ctx, r.call, res)
 }
 
@@ -243,6 +267,15 @@ func (i *Instruments) record(ctx context.Context, call Call, res Result) {
 		i.tokens.Record(ctx, tc.count,
 			genaiconv.OperationNameInvokeAgent, call.provider(), tc.class, set...)
 	}
+}
+
+// RecordUnmeteredRun counts one agent run that was killed before it
+// reported its cost.
+func (i *Instruments) RecordUnmeteredRun(ctx context.Context, call Call) {
+	if i == nil {
+		return
+	}
+	i.unmetered.Add(ctx, 1, metric.WithAttributes(i.metricAttrs(call)...))
 }
 
 // RecordJudgeScores records one verdict's per-axis scores, the distribution a

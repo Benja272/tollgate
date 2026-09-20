@@ -1,0 +1,73 @@
+# openspec/config.yaml — tollgate
+schema: spec-driven
+
+context: |
+  Tech stack: Go 1.25.4, Temporal Go SDK, pgx/v5 (PostgreSQL), OpenTelemetry.
+  Architecture: hexagonal — internal/ports, internal/adapters
+  (claudecode, postgres), internal/engine, internal/gate, internal/telemetry.
+  Testing: go test ./... -race, testify; lint: golangci-lint run (0 issues).
+  Style: strict conventional commits; tests ship with the change; ADRs in
+  docs/adr/ govern runtime/adapter/gate semantics changes.
+
+testing:
+  strict_tdd: true
+  test_runner:
+    command: "go test ./... -race"
+    framework: "go test + testify"
+  layers:
+    unit: true
+    integration: true # postgres, claudecode adapter tests under internal/adapters
+    e2e: false
+  coverage:
+    available: false
+    command: ""
+  quality:
+    linter:
+      available: true
+      command: "golangci-lint run"
+    type_checker:
+      available: false
+      command: ""
+    formatter:
+      available: true
+      command: "gofmt -l ."
+
+rules:
+  proposal:
+    - Read docs/adr/ before proposing changes to runtime, adapter, or gate
+      semantics; conflicting proposals need a new/superseding ADR, not prose
+      that contradicts an accepted one.
+    - Include rollback plan for risky changes.
+  specs:
+    - Use Given/When/Then for scenarios.
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+    - Respect hexagonal boundaries: domain logic never imports adapters;
+      adapters implement internal/ports interfaces.
+  design:
+    - Document architecture decisions with rationale; if a decision has
+      lasting consequences, it belongs in a new numbered docs/adr/NNNN file,
+      not only in design.md.
+    - Preserve ADR numbering sequence (next is 0006).
+  tasks:
+    - Group by phase, use hierarchical numbering.
+    - Keep tasks completable in one session.
+    - Strict TDD: write the failing test first for every task, then the
+      minimal implementation, then refactor.
+  apply:
+    guidelines:
+      - Follow existing code patterns (hexagonal ports/adapters).
+      - Tests ship with the change; no task is done without a passing test.
+      - Strict conventional commits.
+    tdd: true
+    test_command: "go test ./... -race"
+  verify:
+    test_command: "go test ./... -race"
+    build_command: "go build ./..."
+    lint_command: "golangci-lint run"
+    coverage_threshold: 0
+    review_blocking_axes: [correctness, durability-semantics, cost-accounting]
+    review_advisory_axes: [naming, comments, style]
+    review_budget_lines: 800
+  archive:
+    - Warn before merging destructive deltas.
+    - Verify ADR numbering did not collide with a concurrently added ADR.

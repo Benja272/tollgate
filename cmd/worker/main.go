@@ -13,6 +13,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/Benja272/tollgate/internal/adapters/claudecode"
+	"github.com/Benja272/tollgate/internal/adapters/gitcli"
 	"github.com/Benja272/tollgate/internal/adapters/postgres"
 	"github.com/Benja272/tollgate/internal/engine"
 	"github.com/Benja272/tollgate/internal/ports"
@@ -59,7 +60,8 @@ func main() {
 
 	w := worker.New(c, engine.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(engine.JobWorkflow)
-	w.RegisterActivity(&engine.Activities{
+	w.RegisterWorkflow(engine.ArtifactJobWorkflow)
+	acts := &engine.Activities{
 		Agent:     &claudecode.Runner{Bin: "claude"},
 		AgentName: "claude-code",
 		Telemetry: instruments,
@@ -68,8 +70,14 @@ func main() {
 			"sonnet": &claudecode.CLIJudge{Bin: "claude", Model: "sonnet"},
 			"opus":   &claudecode.CLIJudge{Bin: "claude", Model: "opus"},
 		},
-		Ledger: postgres.NewLedger(pool),
-	})
+		Ledger:        postgres.NewLedger(pool),
+		Checkout:      gitcli.Checkout{},
+		WorkspaceRoot: os.Getenv("TOLLGATE_WORKSPACE_ROOT"),
+	}
+	if err := acts.Validate(); err != nil {
+		log.Fatalf("worker configuration: %v", err)
+	}
+	w.RegisterActivity(acts)
 
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		log.Fatalf("worker: %v", err)

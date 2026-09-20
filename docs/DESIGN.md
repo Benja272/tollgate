@@ -58,6 +58,37 @@ Components:
   job ends in `rejected` with the full report.
 - **API/CLI** — submit a job, watch it, query the ledger.
 
+### 2.1 Second job shape: artifact jobs (no PR)
+
+`ArtifactJobWorkflow` (ADR-0006) is a second, simpler job shape for a
+downstream content pipeline: it checks out a pinned commit, overlays
+prepared files onto declared destination roots, runs the agent once, and
+records the cost — with no judges, no gate, and no `Ship`:
+
+```
+checkout (pinned, detached) ► overlay (root-bounded) ► run agent ► record cost
+```
+
+The frozen-engine boundary is the **destination roots**: an artifact job's
+overlay may only ever write inside caller-declared roots (never touching
+`.git` or escaping the checkout via `..` or a symlink), so the pipeline
+repository's own files stay exactly as the checkout left them everywhere
+outside those roots. `JobWorkflow` (the PR-shaped job above) is unaffected
+except for two data-only changes: the billed-failure accounting fix (§ below)
+and the model now riding on `run_agent` cost rows and `invoke_agent` spans.
+
+**Billed failures are recorded before the job fails**, in both job shapes: if
+the agent harness reports `is_error=true` (or exits non-zero with a
+parseable result envelope), the run is billed, and `runAgentAndRecord`
+records that partial cost row before the job terminally fails. A run killed
+before printing an envelope records nothing, since its spend is unknown. It
+is logged, counted as unmetered, and never retried. Every cost row carries
+the Temporal run id, so re-running the same job keeps each execution's
+spend.
+
+See `docs/adr/0006-artifact-jobs.md` for the full design (decisions §1-§10)
+and `docs/artifact-job-cli.md` for how to submit one.
+
 ## 3. Data model (first cut)
 
 - `Job{id, source_ref, repo, status, created_at, decided_at}`
