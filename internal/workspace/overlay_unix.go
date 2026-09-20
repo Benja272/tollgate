@@ -119,7 +119,7 @@ func (w *writer) writeFile(f plannedFile) error {
 	}
 	defer func() { _ = unix.Close(dirFD) }()
 
-	src, err := openSource(f.src)
+	src, err := openSource(f)
 	if err != nil {
 		return err
 	}
@@ -167,10 +167,47 @@ func (w *writer) writeFile(f plannedFile) error {
 	return nil
 }
 
-// openSource opens one source file without following a symlink and without
-// blocking on a FIFO, then insists it is a regular file.
-func openSource(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+// openSource opens one planned source without following a symlink and
+// without blocking on a FIFO, then insists it is a regular file.
+//
+// O_NOFOLLOW protects the LAST component of a path only. A file planned
+// from a source tree is therefore opened one component at a time below the
+// tree's declared root, each with O_NOFOLLOW, so a directory inside the
+// tree swapped for a symlink after the pre-check is refused instead of
+// copying content from outside the tree. The components ABOVE the declared
+// root are the caller's own path and are opened as given.
+func openSource(f plannedFile) (*os.File, error) {
+	if f.root == "" || f.rel == "" || f.rel == "." {
+		return openSourceAt(unix.AT_FDCWD, f.src, f.src)
+	}
+
+	dirFD, err := unix.Open(f.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: open source tree %s: %w", f.root, err)
+	}
+	defer func() { _ = unix.Close(dirFD) }()
+
+	parts := strings.Split(f.rel, string(filepath.Separator))
+	for _, part := range parts[:len(parts)-1] {
+		next, openErr := openDirAt(dirFD, part)
+		if openErr != nil {
+			if errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR) {
+				return nil, fmt.Errorf("%w: %s is no longer a directory in the source tree", ErrUnsupportedSource, f.src)
+			}
+			// A transient cause (permissions, I/O) stays retryable.
+			return nil, fmt.Errorf("workspace: open source dir for %s: %w", f.src, openErr)
+		}
+		_ = unix.Close(dirFD)
+		dirFD = next
+	}
+	return openSourceAt(dirFD, filepath.Base(f.rel), f.src)
+}
+
+// openSourceAt opens name relative to dirFD (or, with AT_FDCWD, by path)
+// without following a symlink and without blocking on a FIFO, and insists
+// the result is a regular file. path names the source in errors.
+func openSourceAt(dirFD int, name, path string) (*os.File, error) {
+	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if errors.Is(err, unix.ELOOP) {
 		return nil, fmt.Errorf("%w: %s is a symlink", ErrUnsupportedSource, path)
 	}
@@ -178,12 +215,13 @@ func openSource(path string) (*os.File, error) {
 		// A transient cause (permissions, I/O) stays retryable.
 		return nil, fmt.Errorf("workspace: open source %s: %w", path, err)
 	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = f.Close()
+	src := os.NewFile(uintptr(fd), path)
+	info, statErr := src.Stat()
+	if statErr != nil || !info.Mode().IsRegular() {
+		_ = src.Close()
 		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsupportedSource, path)
 	}
-	return f, nil
+	return src, nil
 }
 
 // syncDirs fsyncs every scheduled directory, deepest first, making the

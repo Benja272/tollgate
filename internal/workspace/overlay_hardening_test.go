@@ -429,6 +429,31 @@ func TestApply_DestinationTurnedIntoAFileAfterPrecheck_IsAConflict(t *testing.T)
 	require.Equal(t, "planted", string(got), "the planted entry must not be written through")
 }
 
+// O_NOFOLLOW on a source path protects its LAST component only. A
+// directory INSIDE the declared source tree, swapped for a symlink after
+// the pre-check walked it, would otherwise be followed and content from
+// outside the tree copied into the workspace.
+func TestApply_SourceDirInsideTheTreeSwappedAfterPrecheck_Refused(t *testing.T) {
+	ws, _ := engineFixture(t)
+	srcRoot := t.TempDir()
+	inner := filepath.Join(srcRoot, "sub")
+	require.NoError(t, os.MkdirAll(inner, 0o755))
+	writeFile(t, filepath.Join(inner, "x"), "x", 0o644)
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(outside, "x"), "OUTSIDE", 0o644)
+	plantAfterPrecheck(t, func() {
+		require.NoError(t, os.RemoveAll(inner))
+		require.NoError(t, os.Symlink(outside, inner))
+	})
+
+	err := Apply(context.Background(), ws, []string{"output"}, []Overlay{{Source: srcRoot, Dest: "output/c"}}, nil)
+
+	require.ErrorIs(t, err, ErrUnsupportedSource)
+	if got, readErr := os.ReadFile(filepath.Join(ws, "output", "c", "sub", "x")); readErr == nil {
+		require.NotEqual(t, "OUTSIDE", string(got), "content from outside the source tree must never be copied in")
+	}
+}
+
 func TestApply_EveryFileFsyncedBeforeRename(t *testing.T) {
 	ws, _ := engineFixture(t)
 	src := t.TempDir()

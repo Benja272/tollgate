@@ -149,9 +149,16 @@ func destBelongsToRoot(dest string, roots []string) bool {
 	return false
 }
 
-// plannedFile is one regular file an overlay will write.
+// plannedFile is one regular file an overlay will write. A file planned
+// from a source TREE also carries that tree's declared root and its path
+// below it, so the write can open it one component at a time and never
+// follow a directory swapped inside the tree after the pre-check. A
+// single-file overlay has no root: its whole path is what the caller
+// declared.
 type plannedFile struct {
 	src  string
+	root string
+	rel  string
 	dest string
 	perm fs.FileMode
 }
@@ -338,7 +345,9 @@ func planTree(source, dest string, p *plan) error {
 			if err != nil {
 				return fmt.Errorf("%w: %s: %v", ErrUnsupportedSource, path, err)
 			}
-			p.files = append(p.files, plannedFile{src: path, dest: target, perm: info.Mode().Perm()})
+			p.files = append(p.files, plannedFile{
+				src: path, root: source, rel: rel, dest: target, perm: info.Mode().Perm(),
+			})
 		default:
 			return fmt.Errorf("%w: %s is not a regular file", ErrUnsupportedSource, path)
 		}
