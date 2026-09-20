@@ -110,19 +110,22 @@ func (e *RunError) Unwrap() error {
 // an unmetered one (wrapped in an UnmeteredRunError).
 var ErrAmbiguousEnvelope = errors.New("ports: more than one result envelope")
 
-// UnmeteredRunError signals a run that was killed — by a deadline, a
-// cancellation, or a signal — before it printed a result envelope. The
-// harness may already have spent money that nobody can measure, so the run
-// must never be retried automatically: a retry would bill again on top of
-// an unknown amount (ADR-0006 §8). Any other failure without an envelope
-// (the binary is missing, or exited non-zero with no envelope) is a plain
-// error.
+// UnmeteredRunError signals a run that ended without ONE trustworthy cost
+// report: it was killed by a deadline, a cancellation or a signal; it
+// trapped a signal and exited above 128; it exited cleanly with no usable
+// envelope; its output held more than one result envelope
+// (ErrAmbiguousEnvelope); or its output overflowed the adapter's stdout
+// cap. In every case the harness may already have spent money that nobody
+// can measure, so the run must never be retried automatically: a retry
+// would bill again on top of an unknown amount (ADR-0006 §8). A failure
+// that cannot have billed — the binary is missing, or the harness exited
+// 1..128 on its own without an envelope — is a plain error.
 type UnmeteredRunError struct {
 	Err error
 }
 
 func (e *UnmeteredRunError) Error() string {
-	return fmt.Sprintf("unmetered agent run (killed before reporting its cost): %v", e.Err)
+	return fmt.Sprintf("unmetered agent run (no trustworthy cost report): %v", e.Err)
 }
 
 func (e *UnmeteredRunError) Unwrap() error {

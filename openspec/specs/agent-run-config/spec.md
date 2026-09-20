@@ -58,10 +58,16 @@ With an empty `AgentConfig`, the adapter MUST build the minimal command: the sam
 
 ### Requirement: Harness Processes Do Not Outlive the Run
 
-The adapter MUST kill every process the harness started when the run returns, for any outcome. Where the platform allows it, the adapter MUST do this before the harness's own process is reaped, and MUST make the harness die with the worker. *(Second round: R6.)*
+The adapter MUST kill every process the harness started when the run returns, for any outcome. Where the platform allows it, the adapter MUST do this before the harness's own process is reaped, and MUST make the harness die with the worker. *(Second round: R6.)* Making the harness die with the worker reaches the harness process ONLY: what it started survives a worker death. So a run MUST record its process group for its workspace, and a run MUST kill the group recorded for that workspace before it starts, then clear the record. *(Third round: F2.)*
 
 #### Scenario: A background process left by the agent is killed
 
 - GIVEN an agent run that leaves a background process, and that exits cleanly, fails, or reports no cost
 - WHEN the run returns
 - THEN that process is no longer running
+
+#### Scenario: A group left by a killed worker is killed by the next run
+
+- GIVEN a workspace whose previous run recorded a process group that is still alive, because the worker was killed before the run could return
+- WHEN a new run starts in that workspace
+- THEN the recorded group is killed before the harness starts, and the record is cleared

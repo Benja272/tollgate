@@ -18,7 +18,13 @@ Every `run_agent` cost row MUST record the model that ran.
 
 ### Requirement: Natural Key Distinguishes Executions
 
-Every cost row MUST record the Temporal run id of the execution whose activity made the paid call, and the ledger's natural key MUST be `(job_id, run_id, phase, actor, attempt)`. A retried write within one execution is idempotent, and a second execution of the same `job_id` keeps its own rows. The ledger MUST reject a new row without a run id. *(Added by the post-archive review, B8. Second round, R1: the paying run, not the writing run.)*
+Every cost row MUST record the Temporal run id of the execution whose activity made the paid call, and the ledger's natural key MUST be `(job_id, run_id, phase, actor, attempt)`. A retried write within one execution is idempotent, and a second execution of the same `job_id` keeps its own rows. The ledger MUST reject a new row without a run id. *(Added by the post-archive review, B8. Second round, R1: the paying run, not the writing run.)* An entry that carries no run id at all was journaled before run ids existed; the activity that writes it MUST key it by the execution that scheduled the write, which is what that code keyed rows by, rather than retry forever against the ledger's check. *(Third round: F3.)*
+
+#### Scenario: A cost write journaled before run ids existed
+
+- GIVEN a RecordCosts input scheduled by a pre-run-id worker, resumed after a deploy
+- WHEN the activity runs
+- THEN the row is recorded under the run id of the execution that scheduled it, and the job completes instead of retrying
 
 #### Scenario: Workflow reset after the paid call
 
@@ -50,7 +56,7 @@ Ledger rows MUST carry a nullable `piece_id`: set when the caller provides one, 
 
 ### Requirement: Billed Failure Is Recorded Before the Job Fails
 
-When an agent run returns a parseable result envelope reporting `is_error=true`, or a non-zero exit with a parseable envelope, the runner MUST record the `run_agent` cost row with the resolved model before the job fails. This applies to BOTH the artifact job and the PR-shaped `JobWorkflow`. Such a billed failure MUST NOT be retried automatically. When the process produces no parseable envelope, no cost row MUST be recorded. *(Made more precise by the post-archive review, B6/B7.)* If the run started and ended without exactly one usable envelope, it MAY have billed an unknown amount, and the failure MUST be non-retryable, logged, and counted as an unmetered run. That covers: a clean exit, a kill, a signal it trapped (exit status above 128), a context that ended while it ran, more than one result envelope in its output, or output past the stdout cap. *(Second round: R3-R5.)* Only an exit of 1..128 on its own, or a harness that never started, keeps its current retry behavior. A billed failure's cost, usage and model MUST also reach telemetry. If a billed failure's row cannot be recorded, the job MUST fail with an error that says the spend was not recorded.
+When an agent run returns a parseable result envelope reporting `is_error=true`, or a non-zero exit with a parseable envelope, the runner MUST record the `run_agent` cost row with the resolved model before the job fails. This applies to BOTH the artifact job and the PR-shaped `JobWorkflow`. Such a billed failure MUST NOT be retried automatically. When the process produces no parseable envelope, no cost row MUST be recorded. *(Made more precise by the post-archive review, B6/B7.)* If the run started and ended without exactly one usable envelope, it MAY have billed an unknown amount, and the failure MUST be non-retryable, logged, and counted as an unmetered run. That covers: a clean exit, a kill, a signal it trapped (exit status above 128), a context that ended while it ran, more than one result envelope in its output, or output past the stdout cap. *(Second round: R3-R5.)* Only an exit of 1..128 on its own, or a harness that never started, keeps its current retry behavior. A billed failure's cost, usage and model MUST also reach telemetry. What an agent run hands back — its output and every message its failure carries — MUST fit the runtime's payload limit, truncated with an explicit marker when it does not: a result the runtime rejects fails the attempt, loses the spend and bills the run again. *(Third round: F1.)* If a billed failure's row cannot be recorded, the job MUST fail with an error that says the spend was not recorded.
 
 #### Scenario: Billed failure records its cost row before failing (artifact job)
 

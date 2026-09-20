@@ -143,3 +143,72 @@ verify report.
   exclusive lock for the build. That is fine at the current size; a large
   ledger needs a `CONCURRENTLY` migration. Recorded in ADR-0006
   Consequences.
+
+## Third review round
+
+Date: 2026-09-20. A closing re-review of `abf22b3..7c37b5b` returned three
+blockers, every one reproduced by the reviewers: two against a real Temporal
+dev server (one with a pre-change worker resumed by a HEAD worker), one by
+SIGKILLing the worker and inspecting the surviving process group. The fixes
+were made test-first again, and the docs commit closes the stale text the
+earlier rounds left behind.
+
+### Commits
+
+| Commit | Scope |
+|---|---|
+| `3f0a898` | fix(engine,claudecode): bound what a run hands back so a huge result cannot lose its spend |
+| `14290e8` | fix(engine): fill a missing cost-row run id from the execution that scheduled the write |
+| `1681c8d` | fix(claudecode): kill the process group a killed worker left in a workspace |
+| `41d1766` | fix(workspace): classify a too-long destination name as a conflict |
+| `69cd1bf` | refactor(workspace): make durability and conflict classification mutation-visible |
+| `dfb0181` | test: keep the windows vet clean and cover the relative-workspace refusal |
+| `cd1fd6f` | fix(workspace): open a tree's source files one component at a time |
+| (this section) | ADR-0006 round-3 amendments, migration and port doc corrections, this section |
+
+### Blockers
+
+| # | Finding | Red test (failed before the fix) | Fix | Commit |
+|---|---|---|---|---|
+| F1 | An agent result above Temporal's payload limit lost its spend and billed twice. The 64 MiB stdout cap is far above the SDK limit, and `RunAgent` returned the whole `Output`; a billed failure's message carried the harness's whole `result` text. Reproduced on the real dev server with a 5 MiB result: `[TMPRL1103] … exceeded the error limit`, agent invocations 2, ledger rows 0, and the error retryable. | `TestArtifactJobWorkflow_E2E_OversizedAgentResult_OneInvocationOneRow` on the real server (the job failed outright before the fix). Unit level: `TestActivities_RunAgent_OversizedOutput_ResultFitsThePayloadLimit` (5,243,039 bytes), `…_OversizedBilledFailure_…` (5,243,130), `…_OversizedUnmeteredFailure_…` (15,728,844 — the cause chain is serialized message by message), `…_OversizedPlainFailure_KeepsItsSentinelAndFits` (10,485,882), all against a 2 MiB limit. Adapter: `TestRunner_Run_BilledFailureWithHugeResult_ErrorMessageIsBounded` (3,000,053 bytes). | `RunAgent` truncates the output it returns (256 KiB) with a marker stating the agent's real byte count, and bounds every message its failures carry (8 KiB), cause chain included. A bounded cause keeps its sentinel identity — it implements `Is` and deliberately not `Unwrap` — so an oversized adapter error is still mapped to its non-retryable type. The adapter bounds the harness's reported text at its source (2 KiB). Success AND billed paths; both job shapes, since `JobWorkflow` feeds that output to its judges. | `3f0a898` |
+| F2 | `Pdeathsig` reaches the group LEADER only. After a worker SIGKILL the CLI died, but what it started survived, was reparented, and raced the retry in the same workspace. Reproduced: `sleep 300` still alive in the agent's group after `kill -9` of the worker. | `TestRunner_Run_StaleGroupOfAKilledWorker_KilledBeforeTheNextRun` (the stale group was still alive after the next run) and `TestRunner_Run_RecordsItsOwnProcessGroupWhileItRuns` (nothing was recorded). | The simple mitigation, not a supervisor: a run records its process group beside its workspace (`<workspace>.tollgate-agent-group`), and every run kills the group recorded there before starting, then clears the record. The record is kept OUTSIDE the workspace because the agent is untrusted and must not be able to plant a group id tollgate would kill. ADR-0006 §8 now states what `Pdeathsig` does and does not cover, and records the residuals: the kill is best-effort against pid reuse (the same residual the non-Linux group kill has), and a run that never returns leaves a record the next run clears. | `1681c8d` |
+| F3 | A deploy with PR-shaped jobs in flight left them retrying forever: `RecordCosts` inputs scheduled by the pre-change code carry `RunID == ""`, the ledger returns `ErrMissingRunID` as a plain error, and `RecordCosts` runs under the default unlimited retry policy. Reproduced with a pre-change worker resumed by a HEAD worker: status Running, attempt 6, rows 0. | `TestActivities_RecordCosts_EntryWithoutRunID_KeyedByTheRunningExecution` (the blank run id reached the ledger) and `TestActivities_RecordCosts_EntryWithoutRunID_RealLedgerRecordsIt` against Postgres (rejected with `ErrMissingRunID`). | `Activities.RecordCosts` fills an empty run id from `activity.GetInfo(ctx).WorkflowExecution.RunID` — what the pre-change code keyed rows by. A reported run id is never overwritten (`TestActivities_RecordCosts_ReportedRunID_IsNeverOverwritten`), so a reset still records the paying run, and the ledger check stays as the backstop. | `14290e8` |
+
+### Warnings
+
+| Warning | Resolution | Commit |
+|---|---|---|
+| `ENAMETOOLONG` on a long directory name came back retryable. | Classified as `ErrDestinationConflict` in the pre-check's Lstat, with a table case (`output/<256 bytes>/x` onto an existing `output`). | `41d1766` |
+| `O_NOFOLLOW` protects the LAST component of a SOURCE path only: a directory inside the declared source tree, swapped for a symlink after the pre-check, was followed and content from outside the tree copied in (the write stayed inside the roots). | A file planned from a source tree carries that tree's root and its path below it, and is opened one component at a time with `O_NOFOLLOW`, the way destinations already are. Components ABOVE the declared root are the caller's own path and are still opened as given; a single-file overlay is unchanged. `TestApply_SourceDirInsideTheTreeSwappedAfterPrecheck_Refused`. | `cd1fd6f` |
+| `syscall.Mkfifo` without a unix build tag broke `GOOS=windows go vet ./...`. | The command failed on three packages, not one (`Mkfifo`, `Kill`, `SysProcAttr`). The shell- and process-group-dependent test files carry a `unix` tag, and the one engine test that needs `setsid` moved to a `unix`-tagged file, so the portable engine tests stay vetted on Windows. `GOOS=windows go vet ./...` is clean. | `dfb0181` |
+| Deleting the fsync calls left the suite green: the hooks fired AFTER the sync. | The hooks now fire inside the call that syncs (`fsyncDir`, `fsyncFile`). Mutation-checked: with both syncs removed the suite was green before, and three tests fail after. | `69cd1bf` |
+| Emptying `conflictErrnos` left the suite green: every conflict the tests exercised was caught by the pre-check. | `TestApply_DestinationTurnedIntoAFileAfterPrecheck_IsAConflict` pins the write path's own classification. Mutation-checked. | `69cd1bf` |
+| The relative-path refusal in the checkout was uncovered. | `TestCheckout_RelativeWorkspacePath_Refused`. Mutation-checked: removing the guard fails it. | `dfb0181` |
+| Stale docs: `UnmeteredRunError`'s doc and `Error()` still said "killed before reporting its cost"; migration 00004 still called `run_id` "the execution that wrote the row"; ADR-0006's manual-cleanup line ignored the locked worktree a killed `worktree add` leaves. | The port doc and message now name every unmetered class (kill, trapped signal above 128, clean exit without an envelope, ambiguous envelope, stdout overflow); the migration comment says the run that PAID; the cleanup line says `worktree unlock` then remove/prune, or `remove -f -f`. Verified against git 2.43.0: `remove --force` refuses a locked worktree, `prune` skips it, `remove -f -f` succeeds. The ledger's `ErrMissingRunID` doc now names the activity that fills a legacy blank. | (this section) |
+
+### Follow-ups (not fixed in this change)
+
+Recorded, not fixed, in this round:
+
+- **Sparse-checkout repos refuse legitimate retries.** A fresh worktree of a
+  sparse-checkout repository already has `S` entries in `ls-files -v`, which
+  the strict reuse rule (round 2, R7) reads as a hidden modification.
+- **`core.fileMode=false` lets a mode-only change pass as clean.** Reuse
+  then accepts a worktree whose file modes were changed.
+- **The reserved-name scan holds the whole listing in memory.** 94 ms and
+  63 MiB on a 300k-path repository; it should stream.
+- **Duplicate `JudgeModels` entries silently drop a paid judgment.** Two
+  identical model names produce two paid judge calls whose cost rows share
+  the natural key, so `ON CONFLICT DO NOTHING` keeps one.
+- **A failed judge future skips `RecordCosts` for judges already paid.**
+  `JobWorkflow` returns on the first failing future, before the batch write,
+  so the judgments that succeeded are never recorded.
+- **The late-cancel group-kill race.** `os/exec` can call `Cmd.Cancel` after
+  the leader has been reaped, so the group kill can reach a reused group id
+  — the non-Linux residual, reachable on Linux through this path.
+- **A pretty-printed envelope plus a noise line is treated as unmetered.**
+  The envelope scan is line-based, so a multi-line JSON object is not seen
+  as a candidate unless it is the whole output.
+- **A killed `git worktree add` leaves a `git reset` child behind.** The
+  checkout does not put git in its own process group, so the child survives
+  the cancelled parent.

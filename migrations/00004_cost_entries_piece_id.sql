@@ -5,7 +5,9 @@
 ALTER TABLE cost_entries ADD COLUMN piece_id TEXT;
 CREATE INDEX cost_entries_piece_id_idx ON cost_entries (piece_id) WHERE piece_id IS NOT NULL;
 
--- run_id is the Temporal run id of the execution that wrote the row. The
+-- run_id is the Temporal run id of the execution that PAID for the row, not
+-- the one that writes it: after a workflow reset a new run re-issues the
+-- write for a call an earlier run paid for (ADR-0006 §9). The
 -- same job_id can be executed more than once (re-running a piece to compare
 -- models), and every execution bills; without run_id in the natural key the
 -- second execution's row hit ON CONFLICT DO NOTHING and its spend was lost.

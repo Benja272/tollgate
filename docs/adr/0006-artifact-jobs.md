@@ -6,7 +6,8 @@ Amended: 2026-09-17, after the post-archive review
 (`openspec/changes/archive/2026-09-16-artifact-jobs/post-archive-review.md`).
 Amended text is marked *(amended)*. The second review round (same file,
 "Second review round") amended it again; that text is marked
-*(amended, round 2)*.
+*(amended, round 2)*. The third round ("Third review round") amended it once
+more; that text is marked *(amended, round 3)* or *(round 3)*.
 
 ## Context
 
@@ -478,7 +479,11 @@ The existing code shapes the decision in four ways:
   the source clone, run
   `git -C <repo> worktree remove --force <WorkspaceRoot>/tollgate-artifact-<job_id>`.
   If the directory was already deleted, run `git -C <repo> worktree prune`
-  to drop the stale administrative entry. A job overlay leaves untracked
+  to drop the stale administrative entry. *(amended, round 3)* A killed
+  `git worktree add` leaves the worktree LOCKED as "initializing", and both
+  `remove --force` and `prune` refuse a locked worktree: unlock it first
+  (`git -C <repo> worktree unlock <path>`, then remove or prune), or force
+  twice (`git -C <repo> worktree remove -f -f <path>`). A job overlay leaves untracked
   files, so re-running the same `job_id` requires removing its worktree
   first (see the next item).
 - **Strict checkout reuse.** An existing checkout is reused only if it
@@ -526,6 +531,25 @@ The existing code shapes the decision in four ways:
   that kill could in principle reach a new process group that reused the
   id. On Linux the kill happens while the leader is an unreaped zombie, so
   the id cannot be reused.
+- **Known defects recorded, not fixed** *(round 3)*. Each is written up in
+  the post-archive review's Follow-ups, with its reproduction:
+  - a fresh worktree of a sparse-checkout repository already has `S`
+    entries, so the strict reuse rule refuses a legitimate retry;
+  - `core.fileMode=false` lets a mode-only change pass the reuse check as
+    clean;
+  - the reserved-name scan holds a whole repository listing in memory
+    (94 ms / 63 MiB on 300k paths);
+  - duplicate `JudgeModels` entries pay twice and record once, because the
+    two rows share the natural key;
+  - a failed judge future returns before the batch write, so judgments
+    already paid for are never recorded;
+  - `os/exec` can call `Cmd.Cancel` after the leader is reaped, which
+    reaches the non-Linux group-kill residual from Linux too;
+  - a pretty-printed envelope beside a noise line is read as unmetered,
+    because the envelope scan is line-based;
+  - a killed `git worktree add` leaves its `git reset` child running: the
+    checkout does not put git in its own process group.
+
 - **Migration 00004 locks the table while it rebuilds the natural key**
   *(round 2)*. `CREATE UNIQUE INDEX` without `CONCURRENTLY` takes an
   exclusive lock for the duration of the build. That is fine at the
