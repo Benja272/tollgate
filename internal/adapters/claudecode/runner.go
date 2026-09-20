@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +40,59 @@ const defaultStdoutCap = 64 << 20
 // message crosses process boundaries where a multi-megabyte string is
 // rejected outright (ADR-0006 §8).
 const maxErrorResultBytes = 2048
+
+// agentGroupRecordSuffix names the file that records the process group of
+// the agent currently running in a workspace.
+const agentGroupRecordSuffix = ".tollgate-agent-group"
+
+// agentGroupRecordPath is where a workspace's agent process group is
+// recorded: BESIDE the workspace, never inside it. The agent is untrusted
+// (ADR-0006) and must not be able to plant a process group tollgate would
+// kill. An empty workspace path means no record is kept.
+func agentGroupRecordPath(workspace string) string {
+	if workspace == "" {
+		return ""
+	}
+	return filepath.Clean(workspace) + agentGroupRecordSuffix
+}
+
+// killRecordedGroup kills the process group an earlier run recorded for
+// this workspace and clears the record. A recorded group whose leader is
+// gone is normal: the record outlives only what escaped it. The pid may
+// also have been reused by then, so the kill is best-effort by design —
+// ADR-0006 §8 records that residual.
+func killRecordedGroup(workspace string) {
+	path := agentGroupRecordPath(workspace)
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		// A pgid of 0 or 1 would signal this process's own group, or every
+		// process this user owns; neither can be an agent tollgate started.
+		if pgid, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); convErr == nil && pgid > 1 {
+			_ = killProcessGroup(pgid, syscall.SIGKILL)
+		}
+	}
+	_ = os.Remove(path)
+}
+
+// recordAgentGroup records the group of a run that has just started, so a
+// worker death between here and the run's return leaves the next run
+// something to kill. Setpgid makes the leader's pid its group id.
+func recordAgentGroup(workspace string, pgid int) {
+	if path := agentGroupRecordPath(workspace); path != "" {
+		_ = os.WriteFile(path, []byte(strconv.Itoa(pgid)+"\n"), 0o600)
+	}
+}
+
+// clearAgentGroupRecord drops the record of a run that has returned: its
+// group has already been killed.
+func clearAgentGroupRecord(workspace string) {
+	if path := agentGroupRecordPath(workspace); path != "" {
+		_ = os.Remove(path)
+	}
+}
 
 // Runner shells the Claude Code CLI. Bin is the binary to invoke, normally
 // "claude"; tests point it at a fake. WaitDelay overrides defaultWaitDelay.
@@ -200,7 +256,13 @@ func (r *Runner) Run(ctx context.Context, spec ports.RunSpec) (ports.RunResult, 
 	cmd.Cancel = func() error { return killGroup(cmd, sig) }
 	cmd.WaitDelay = r.waitDelay()
 
-	runErr := runProcess(cmd)
+	// Pdeathsig kills the CLI when the worker dies, but only the CLI: what
+	// it started is reparented and would race this run inside the same
+	// workspace. Whatever an earlier run recorded there is killed first.
+	killRecordedGroup(spec.WorkspacePath)
+	runErr := runProcess(cmd, func(pid int) { recordAgentGroup(spec.WorkspacePath, pid) })
+	// Every return from runProcess has already killed the group.
+	clearAgentGroupRecord(spec.WorkspacePath)
 	if cmd.Process == nil {
 		// The CLI never started (missing binary, unsupported platform).
 		return ports.RunResult{}, fmt.Errorf("claude code run: %w", runErr)

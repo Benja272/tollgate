@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -460,4 +461,55 @@ func TestRunner_Run_BilledFailureWithHugeResult_ErrorMessageIsBounded(t *testing
 	assert.InDelta(t, 0.07, billed.Result.CostUSD, 1e-9, "the cost is what this failure exists to carry")
 	assert.Less(t, len(err.Error()), 64<<10, "a billed failure's message must stay small enough to travel")
 	assert.Contains(t, err.Error(), "truncated")
+}
+
+// Pdeathsig reaches only the group leader: when the worker is SIGKILLed the
+// CLI dies with it, but everything the CLI started survives, is reparented,
+// and then races the server's retry inside the same workspace. A run
+// records its group so the next run in that workspace can kill it first
+// (review F2).
+func TestRunner_Run_StaleGroupOfAKilledWorker_KilledBeforeTheNextRun(t *testing.T) {
+	workspace := t.TempDir()
+
+	survivor := exec.Command("sh", "-c", "sleep 300")
+	survivor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, survivor.Start())
+	stalePGID := survivor.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-stalePGID, syscall.SIGKILL)
+		_, _ = survivor.Process.Wait()
+	})
+	require.NoError(t, os.WriteFile(agentGroupRecordPath(workspace),
+		[]byte(strconv.Itoa(stalePGID)+"\n"), 0o600))
+
+	bin := fakeClaude(t, `echo '`+okEnvelope+`'`)
+	got, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: workspace, Prompt: "p"})
+
+	require.NoError(t, err)
+	assert.InDelta(t, 0.07, got.CostUSD, 1e-9)
+	require.Eventually(t, func() bool { return !processAlive(stalePGID) }, 2*time.Second, 20*time.Millisecond,
+		"the stale group of an earlier run must be dead before a new run touches its workspace")
+	assert.NoFileExists(t, agentGroupRecordPath(workspace),
+		"the record is cleared once its group is gone")
+}
+
+// The record has to exist WHILE the agent runs — that is the only moment a
+// SIGKILLed worker can leave it behind.
+func TestRunner_Run_RecordsItsOwnProcessGroupWhileItRuns(t *testing.T) {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skipf("/proc is not available: %v", err)
+	}
+	workspace := t.TempDir()
+	record := agentGroupRecordPath(workspace)
+	bin := fakeClaude(t, `recorded=$(cat "`+record+`" 2>/dev/null); own=$(awk '{print $5}' /proc/$$/stat); `+
+		`printf '{"type":"result","is_error":false,"total_cost_usd":0.07,"result":"%s|%s"}\n' "$recorded" "$own"`)
+
+	got, err := (&Runner{Bin: bin}).Run(context.Background(), ports.RunSpec{WorkspacePath: workspace, Prompt: "p"})
+
+	require.NoError(t, err)
+	recorded, own, ok := strings.Cut(got.Output, "|")
+	require.True(t, ok, "output %q", got.Output)
+	assert.NotEmpty(t, own)
+	assert.Equal(t, own, strings.TrimSpace(recorded), "the running agent's own process group must be on record")
+	assert.NoFileExists(t, record, "the record is cleared when the run returns")
 }

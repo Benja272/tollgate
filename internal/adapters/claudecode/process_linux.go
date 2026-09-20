@@ -18,11 +18,12 @@ func configureProcess(cmd *exec.Cmd, deathSig syscall.Signal) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: deathSig}
 }
 
-// runProcess starts the CLI and waits for it. Once the group leader exits,
-// and before it is reaped, the whole group is killed: a zombie leader keeps
-// its pid — and therefore the group id — from being reused, so the kill can
-// only reach processes the agent started.
-func runProcess(cmd *exec.Cmd) error {
+// runProcess starts the CLI and waits for it, calling started with the
+// leader's pid — its process group id — as soon as it exists. Once the
+// group leader exits, and before it is reaped, the whole group is killed: a
+// zombie leader keeps its pid — and therefore the group id — from being
+// reused, so the kill can only reach processes the agent started.
+func runProcess(cmd *exec.Cmd, started func(pid int)) error {
 	// Pdeathsig fires when the OS thread that started the child exits, not
 	// only the process; the thread stays locked until the child is reaped.
 	runtime.LockOSThread()
@@ -31,6 +32,7 @@ func runProcess(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	started(cmd.Process.Pid)
 	waitLeaderExit(cmd.Process.Pid)
 	_ = killGroup(cmd, syscall.SIGKILL)
 	return cmd.Wait()

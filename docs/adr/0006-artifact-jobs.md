@@ -283,8 +283,20 @@ The existing code shapes the decision in four ways:
        killed. The group id could in principle have been reused (see
        Consequences).
      - On Linux the CLI also gets `Pdeathsig=SIGKILL`, with its starting OS
-       thread locked until it is reaped, so it dies with the worker instead
-       of racing the server's retry in the same workspace.
+       thread locked until it is reaped. *(amended, round 3)* That signal
+       reaches the group **leader only** — the CLI process itself. Anything
+       the CLI started survives the worker's death, is reparented, and keeps
+       running in the same workspace; reproduced by SIGKILLing the worker and
+       finding the agent's `sleep 300` still alive in its group.
+     - *(round 3)* So a run also **records its process group beside its
+       workspace** (`<workspace>.tollgate-agent-group`), and every run kills
+       the group recorded there before it starts, then clears the record.
+       The record sits outside the workspace on purpose: the agent is
+       untrusted and must not be able to plant a group id tollgate would
+       kill. Residuals: the kill is best-effort (the pid may have been
+       reused by a group tollgate never started, the same residual the
+       non-Linux group kill has), and a workspace whose run never reached
+       its return leaves a record the NEXT run clears.
      - A process that escaped the group (`setsid`) can still hold stdout.
        `WaitDelay` bounds that wait, and the captured stdout is still read.
    - *(amended, round 2)* The failure classes, with no usable envelope:
@@ -506,7 +518,9 @@ The existing code shapes the decision in four ways:
   cap, `runAgentMaxAttempts` (2). Closing this gap needs a record written
   before the agent starts (an intent row reconciled after the fact), which
   is out of scope here. On Linux, `Pdeathsig` at least stops the orphaned
-  CLI from racing that retry in the same workspace.
+  CLI itself from racing that retry in the same workspace; *(round 3)* what
+  the CLI started survives it, and is killed by the next run in that
+  workspace through the recorded process group (§8).
 - **Group-kill residual outside Linux** *(round 2)*. Without
   `waitid(WNOWAIT)` the leader is reaped before its group is killed, so
   that kill could in principle reach a new process group that reused the

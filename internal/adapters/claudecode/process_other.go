@@ -16,6 +16,8 @@ func configureProcess(*exec.Cmd, syscall.Signal) {}
 
 func killGroup(*exec.Cmd, syscall.Signal) error { return nil }
 
-func runProcess(*exec.Cmd) error {
+func killProcessGroup(int, syscall.Signal) error { return errors.ErrUnsupported }
+
+func runProcess(*exec.Cmd, func(pid int)) error {
 	return fmt.Errorf("claude code runner needs Unix process groups: %w", errors.ErrUnsupported)
 }
